@@ -1,0 +1,55 @@
+[
+  {
+    "projectId": "prj_shop",
+    "name": "shop",
+    "description": "Storefront",
+    "createdAt": "2026-08-02T10:00:00.000Z",
+    "organizationId": "org1",
+    "env": "",
+    "environments": [
+      {
+        "name": "production",
+        "environmentId": "env_shop_prod",
+        "isDefault": true,
+        "applications": [
+          { "applicationId": "app_web", "name": "web", "applicationStatus": "done" }
+        ],
+        "mariadb": [],
+        "mongo": [ { "mongoId": "mongo_sessions" } ],
+        "mysql": [ { "mysqlId": "mysql_legacy" } ],
+        "postgres": [ { "postgresId": "pg_main" } ],
+        "redis": [ { "redisId": "redis_cache" } ],
+        "compose": [
+          { "composeId": "cmp_stack", "name": "observability", "composeStatus": "running" }
+        ],
+        "libsql": [ { "libsqlId": "libsql_edge" } ]
+      },
+      {
+        "name": "staging",
+        "environmentId": "env_shop_stg",
+        "isDefault": false,
+        "applications": [],
+        "mariadb": [ { "mariadbId": "maria_stg" } ],
+        "mongo": [],
+        "mysql": [],
+        "postgres": [],
+        "redis": [],
+        "compose": [],
+        "libsql": []
+      }
+    ],
+    "projectTags": [
+      { "projectId": "prj_shop", "tagId": "tag1", "tag": { "tagId": "tag1", "name": "customer", "color": "#ff0000", "organizationId": "org1", "createdAt": "2026-08-01T00:00:00.000Z" } }
+    ]
+  },
+  {
+    "projectId": "prj_empty",
+    "name": "empty",
+    "description": null,
+    "createdAt": "2026-07-01T10:00:00.000Z",
+    "organizationId": "org1",
+    "env": "",
+    "environments": [],
+    "projectTags": []
+  }
+]

@@ -1,0 +1,30 @@
+[
+  {
+    "projectId": "prj_shop",
+    "name": "shop",
+    "description": "Storefront",
+    "createdAt": "2026-08-02T10:00:00.000Z",
+    "organizationId": "org1",
+    "env": "",
+    "environments": [
+      {
+        "environmentId": "env_shop_prod",
+        "isDefault": true,
+        "name": "production",
+        "applications": [
+          { "applicationId": "app_web", "name": "web", "applicationStatus": "done" }
+        ],
+        "libsql": [],
+        "mariadb": [],
+        "mongo": [],
+        "mysql": [],
+        "postgres": [
+          { "postgresId": "pg_main", "name": "main-db", "applicationStatus": "running" }
+        ],
+        "redis": [],
+        "compose": []
+      }
+    ],
+    "projectTags": []
+  }
+]
