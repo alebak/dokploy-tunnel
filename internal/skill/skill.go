@@ -69,6 +69,7 @@ var meanings = map[clierr.Code]string{
 	clierr.NetworkNotAttachable: "The target network cannot be attached",
 	clierr.ElevationRequired:    "The operation needs administrator privileges",
 	clierr.Unreachable:          "A remote endpoint could not be reached",
+	clierr.NotFound:             "A named resource, such as a project or service, does not exist or is not visible",
 }
 
 // Write renders the SKILL.md for s to w.

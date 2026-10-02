@@ -110,6 +110,7 @@ Every error has a stable code with its own exit code, so scripts and agents can 
 | 6 | `network_not_attachable` | The target network cannot be attached |
 | 7 | `elevation_required` | The operation needs administrator privileges |
 | 8 | `unreachable` | A remote endpoint could not be reached |
+| 9 | `not_found` | A named resource, such as a project or service, does not exist or is not visible |
 
 Without `--json`, errors are printed to stderr as `doktunnel: <message> [<code>]`, followed by a `hint:` line when there is one.
 

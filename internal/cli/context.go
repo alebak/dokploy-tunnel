@@ -419,7 +419,9 @@ func apiError(url string, err error) error {
 	case errors.Is(err, dokploy.ErrUnexpectedResponse):
 		return clierr.Newf(clierr.Unreachable, "%s did not answer like a Dokploy panel: %v", url, err).
 			WithHint("check that --url is the address of the Dokploy panel itself")
+	case errors.Is(err, dokploy.ErrNotFound):
+		return clierr.Newf(clierr.NotFound, "Dokploy at %s: %v", url, err)
 	default:
-		return fmt.Errorf("validating the API key: %w", err)
+		return fmt.Errorf("calling Dokploy at %s: %w", url, err)
 	}
 }
