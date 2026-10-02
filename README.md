@@ -9,7 +9,7 @@
 
 ## Status
 
-**Early development.** The release pipeline is in place, but the binaries do not implement tunneling yet; `doktunnel` has its command tree and error model in place, and its commands report `not_implemented`. Expect breaking changes before 1.0.0.
+**Early development.** The release pipeline is in place, but the binaries do not implement tunneling yet. `doktunnel` can register Dokploy panels as [contexts](#contexts); its other commands report `not_implemented`. Expect breaking changes before 1.0.0.
 
 ## Install
 
@@ -46,7 +46,44 @@ Download the archive for your platform from [Releases](https://github.com/alebak
 
 ## Usage
 
-`doktunnel --help` lists the command groups: `context`, `services`, `forward`, `status`, and `hosts`. They are not implemented yet and exit with the `not_implemented` error. `doktunnel --version` prints the build version.
+`doktunnel --help` lists the command groups: `context`, `services`, `forward`, `status`, and `hosts`. Only `context` is implemented so far; the others exit with the `not_implemented` error. `doktunnel <command> --help` shows a command's flags, and `doktunnel --version` prints the build version.
+
+### Contexts
+
+A context is one Dokploy panel plus one organization in it. doktunnel authenticates with a Dokploy **API key**, and every key is bound to a single organization, so you add one context per panel and organization you work with. Logging in with a username and password is not supported.
+
+1. In the Dokploy panel, open **Settings → API keys** and create a key, choosing the organization it belongs to. Create one dedicated key per machine, named after it, so you can revoke a single machine without affecting the others.
+2. Register it:
+
+   ```sh
+   doktunnel context add --url https://dokploy.example.com --name prod
+   ```
+
+   doktunnel asks for the key with a hidden prompt, checks it against the Dokploy API, and discovers the organization's ID and name. Any scheme and port work, such as `http://192.168.1.20:3000`.
+
+| Command | Purpose |
+|---------|---------|
+| `doktunnel context add --url <URL> --name <name>` | Validate an API key and register the panel and organization. The first context becomes the current one. |
+| `doktunnel context list` | List contexts; the current one is marked with `*`. |
+| `doktunnel context use <name>` | Make a context current. |
+| `doktunnel context remove <name>` | Remove a context and delete its key from the keyring. Revoke the key in Dokploy too if you no longer need it. |
+
+Every other command uses the current context; `--context <name>` picks another one for a single invocation.
+
+**Where things are stored.** The API key is stored only in the operating system's keyring: the Secret Service on Linux (GNOME Keyring, KWallet, KeePassXC), the Keychain on macOS, and the Credential Manager on Windows. It is never written to a file. The panel URL, name, and organization are kept in `doktunnel/config.json` inside your user config directory (`$XDG_CONFIG_HOME` or `~/.config` on Linux, `~/Library/Application Support` on macOS, `%AppData%` on Windows). On a Linux machine without a Secret Service, `context add` fails rather than store the key in plain text.
+
+**Scripts and agents.** The key is never accepted as a flag value, because flag values end up in shell history and in process listings visible to other users. Without a terminal, pass it on stdin or in the environment:
+
+```sh
+pass show dokploy/prod | doktunnel context add --url https://dokploy.example.com --name prod --api-key-stdin --json
+DOKTUNNEL_API_KEY="$(pass show dokploy/prod)" doktunnel context add --url https://dokploy.example.com --name prod --no-input --json
+```
+
+**Plain HTTP.** With an `http://` URL the API key and all traffic cross the network unencrypted, and `context add` prints a warning (in `--json` mode, the warning is in the result's `warnings` list instead). Use `https://` unless the network is trusted, such as a LAN or a VPN.
+
+**Proxies.** Requests to Dokploy honor the `HTTPS_PROXY`, `HTTP_PROXY`, and `NO_PROXY` environment variables.
+
+With `--json`, `add` and `use` print the context as `{"name","url","organization_id","organization_name","current"}` (plus `warnings` when there are any), `list` prints `{"current_context":"...","contexts":[...]}`, and `remove` prints `{"name":"...","removed":true}`. An invalid key fails with `permission_denied`; a panel that cannot be reached, or that does not answer like Dokploy, fails with `unreachable`.
 
 ### Global flags
 
