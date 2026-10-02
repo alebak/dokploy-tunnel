@@ -1,0 +1,63 @@
+{
+  "composeId": "cmp_stack",
+  "name": "observability",
+  "appName": "shop-observability-d4e5f6",
+  "description": null,
+  "env": "GRAFANA_PASSWORD=do-not-log",
+  "composeFile": "services:\n  grafana:\n    image: grafana/grafana\n  prometheus:\n    image: prom/prometheus\n",
+  "refreshToken": "tok_refresh",
+  "sourceType": "raw",
+  "composeType": "docker-compose",
+  "command": "",
+  "composePath": "./docker-compose.yml",
+  "suffix": "",
+  "randomize": false,
+  "isolatedDeployment": true,
+  "isolatedDeploymentsVolume": false,
+  "triggerType": "push",
+  "composeStatus": "running",
+  "icon": null,
+  "environmentId": "env_shop_prod",
+  "createdAt": "2026-08-02T11:00:00.000Z",
+  "watchPaths": null,
+  "githubId": null,
+  "gitlabId": null,
+  "bitbucketId": null,
+  "giteaId": null,
+  "serverId": "srv_edge",
+  "serviceNetworks": [
+    { "serviceName": "prometheus", "networkIds": ["net_metrics"], "detachDokployNetwork": true }
+  ],
+  "environment": {
+    "environmentId": "env_shop_prod",
+    "name": "production",
+    "isDefault": true,
+    "projectId": "prj_shop",
+    "project": { "projectId": "prj_shop", "name": "shop", "organizationId": "org1", "env": "" }
+  },
+  "deployments": [],
+  "mounts": [],
+  "domains": [
+    {
+      "domainId": "dom_grafana",
+      "host": "grafana.example.com",
+      "https": true,
+      "port": 3000,
+      "path": "/",
+      "serviceName": "grafana",
+      "domainType": "compose",
+      "composeId": "cmp_stack",
+      "applicationId": null,
+      "certificateType": "letsencrypt",
+      "enabled": true
+    }
+  ],
+  "github": null,
+  "gitlab": null,
+  "bitbucket": null,
+  "gitea": null,
+  "server": { "serverId": "srv_edge", "name": "edge-1", "ipAddress": "203.0.113.10", "port": 22, "username": "root", "organizationId": "org1" },
+  "backups": [],
+  "hasGitProviderAccess": true,
+  "unauthorizedProvider": null
+}

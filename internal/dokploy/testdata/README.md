@@ -18,3 +18,27 @@ output as plain JSON.
 
 Table columns come from `packages/server/src/db/schema/project.ts`,
 `environment.ts` and the per-type schema files.
+
+## Service details
+
+Each `<type>.one` procedure takes the service ID as a query parameter named
+after the type (`applicationId`, `composeId`, `postgresId`, `mysqlId`,
+`mariadbId`, `mongoId`, `redisId`, `libsqlId`) and returns the table row plus
+the relations loaded by `find<Type>ById` in `packages/server/src/services/`.
+Only a representative subset of columns is kept; secrets are placeholders.
+
+| Fixture | Router (`apps/dokploy/server/api/routers/`) | Columns (`packages/server/src/db/schema/`) | Relations (`packages/server/src/services/`) |
+| --- | --- | --- | --- |
+| `application.one.json` | `application.ts` `one` (adds `hasGitProviderAccess`, `unauthorizedProvider`) | `application.ts`; `ports` rows from `port.ts`; `domains` rows from `domain.ts` | `application.ts` `findApplicationById` |
+| `compose.one.json` | `compose.ts` `one` | `compose.ts` (`composeType`, `isolatedDeployment`, `serviceNetworks`); `domain.ts` | `compose.ts` `findComposeById` |
+| `postgres.one.json` | `postgres.ts` `one` | `postgres.ts` (`networkIds`, `detachDokployNetwork`) | `postgres.ts` `findPostgresById` |
+| `mysql.one.json` | `mysql.ts` `one` | `mysql.ts` | `mysql.ts` `findMySqlById` |
+| `mariadb.one.json` | `mariadb.ts` `one` | `mariadb.ts` | `mariadb.ts` `findMariadbById` |
+| `mongo.one.json` | `mongo.ts` `one` | `mongo.ts` (`networkSwarm` override) | `mongo.ts` `findMongoById` |
+| `redis.one.json` | `redis.ts` `one` | `redis.ts` (remote `serverId`, `server`) | `redis.ts` `findRedisById` |
+| `libsql.one.json` | `libsql.ts` `one` | `libsql.ts` (`externalGRPCPort`, `externalAdminPort`) | `libsql.ts` `findLibsqlById` |
+
+The fixed database ports the client reports (postgres 5432, mysql and
+mariadb 3306, mongo 27017, redis 6379, libsql 8080 HTTP, 5001 gRPC and 5000
+admin) are the `TargetPort` values in
+`packages/server/src/utils/databases/<type>.ts`.

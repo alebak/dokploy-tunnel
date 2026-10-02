@@ -35,6 +35,9 @@ var (
 	ErrUnreachable = errors.New("Dokploy panel is unreachable")
 	// ErrUnexpectedResponse means the panel answered, but not like Dokploy.
 	ErrUnexpectedResponse = errors.New("unexpected response from Dokploy")
+	// ErrNotFound means Dokploy reported that the requested resource, such
+	// as a service, does not exist.
+	ErrNotFound = errors.New("not found in Dokploy")
 )
 
 // Organization is a Dokploy organization.
@@ -150,6 +153,8 @@ func (c *Client) query(ctx context.Context, procedure string, params url.Values,
 	switch {
 	case resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden:
 		return fmt.Errorf("%w (HTTP %d from %s)", ErrUnauthorized, resp.StatusCode, procedure)
+	case resp.StatusCode == http.StatusNotFound && isNotFoundError(resp.Body):
+		return fmt.Errorf("%w (%s)", ErrNotFound, procedure)
 	case resp.StatusCode >= 300 && resp.StatusCode < 400:
 		return fmt.Errorf("%w: %s redirected to %q; use that URL instead",
 			ErrUnexpectedResponse, procedure, resp.Header.Get("Location"))
@@ -168,4 +173,15 @@ func (c *Client) query(ctx context.Context, procedure string, params url.Values,
 		return fmt.Errorf("%w: %s did not return JSON: %v", ErrUnexpectedResponse, procedure, err)
 	}
 	return nil
+}
+
+// isNotFoundError reports whether body is the error Dokploy sends when a
+// procedure finds nothing, telling it apart from a 404 page served by
+// something other than Dokploy.
+func isNotFoundError(body io.Reader) bool {
+	var e struct {
+		Code string `json:"code"`
+	}
+	err := json.NewDecoder(io.LimitReader(body, maxResponseBytes)).Decode(&e)
+	return err == nil && e.Code == "NOT_FOUND"
 }

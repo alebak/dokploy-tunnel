@@ -1,0 +1,45 @@
+{
+  "redisId": "redis_cache",
+  "name": "cache",
+  "appName": "shop-cache-555555",
+  "description": null,
+  "databaseName": "app",
+  "databaseUser": "app",
+  "databasePassword": "do-not-log",
+  "dockerImage": "redis:latest",
+  "command": null,
+  "env": null,
+  "memoryReservation": null,
+  "externalPort": null,
+  "applicationStatus": "error",
+  "healthCheckSwarm": null,
+  "networkSwarm": null,
+  "replicas": 1,
+  "createdAt": "2026-08-02T12:00:00.000Z",
+  "environmentId": "env_shop_prod",
+  "serverId": "srv_edge",
+  "networkIds": [],
+  "detachDokployNetwork": false,
+  "environment": {
+    "environmentId": "env_shop_prod",
+    "name": "production",
+    "isDefault": true,
+    "projectId": "prj_shop",
+    "project": {
+      "projectId": "prj_shop",
+      "name": "shop",
+      "organizationId": "org1",
+      "env": ""
+    }
+  },
+  "mounts": [],
+  "server": {
+    "serverId": "srv_edge",
+    "name": "edge-1",
+    "ipAddress": "203.0.113.10",
+    "port": 22,
+    "username": "root",
+    "organizationId": "org1"
+  },
+  "backups": []
+}

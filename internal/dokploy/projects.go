@@ -64,7 +64,7 @@ func decodeEnvironment(fields map[string]json.RawMessage) (Environment, error) {
 		return Environment{}, err
 	}
 	env.Services = []Service{}
-	for _, spec := range serviceSpecs {
+	for _, spec := range serviceSpecs() {
 		var items []map[string]json.RawMessage
 		if err := decodeField(fields, spec.listKey, &items); err != nil {
 			return Environment{}, err
