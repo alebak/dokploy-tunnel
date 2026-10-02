@@ -1,20 +1,20 @@
-// Command doktunnel is a placeholder entrypoint; only --version is implemented.
+// Command doktunnel is the doktunnel CLI; the command tree lives in internal/cli.
 package main
 
 import (
-	"fmt"
 	"os"
 
-	"github.com/alebak/dokploy-tunnel/internal/version"
+	"github.com/alebak/dokploy-tunnel/internal/cli"
+	"github.com/alebak/dokploy-tunnel/internal/prompt"
 )
 
-const binaryName = "doktunnel"
-
 func main() {
-	if len(os.Args) == 2 && os.Args[1] == "--version" {
-		fmt.Println(version.String(binaryName))
-		return
+	app := &cli.App{
+		Root:            cli.NewRoot(),
+		Stdin:           os.Stdin,
+		Stdout:          os.Stdout,
+		Stderr:          os.Stderr,
+		StdinIsTerminal: prompt.IsTerminal(os.Stdin),
 	}
-	fmt.Fprintf(os.Stderr, "%s: not implemented yet (only --version is available)\n", binaryName)
-	os.Exit(1)
+	os.Exit(app.Run(os.Args[1:]))
 }

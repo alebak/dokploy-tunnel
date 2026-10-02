@@ -34,7 +34,10 @@ func WriteError(stdout, stderr io.Writer, jsonMode bool, err *clierr.Error) {
 
 // WriteJSON writes v to w as a single line of JSON.
 func WriteJSON(w io.Writer, v any) error {
-	if err := json.NewEncoder(w).Encode(v); err != nil {
+	enc := json.NewEncoder(w)
+	// Keep hints such as "--context <name>" readable instead of <-escaped.
+	enc.SetEscapeHTML(false)
+	if err := enc.Encode(v); err != nil {
 		return fmt.Errorf("encoding JSON output: %w", err)
 	}
 	return nil

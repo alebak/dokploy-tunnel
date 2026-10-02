@@ -1,0 +1,189 @@
+package cli
+
+import (
+	"errors"
+	"flag"
+	"fmt"
+	"io"
+	"strconv"
+	"strings"
+	"text/tabwriter"
+
+	"github.com/alebak/dokploy-tunnel/internal/clierr"
+	"github.com/alebak/dokploy-tunnel/internal/output"
+	"github.com/alebak/dokploy-tunnel/internal/prompt"
+	"github.com/alebak/dokploy-tunnel/internal/version"
+)
+
+// App runs a command tree against a set of standard streams.
+type App struct {
+	// Root is the top of the command tree; its Name is the binary name.
+	Root *Command
+	// Stdin is read when a command prompts for a missing value.
+	Stdin io.Reader
+	// Stdout receives results, help, and errors in JSON mode.
+	Stdout io.Writer
+	// Stderr receives human-readable errors and prompts.
+	Stderr io.Writer
+	// StdinIsTerminal reports whether prompting is possible at all; when it
+	// is false, --no-input is implied.
+	StdinIsTerminal bool
+}
+
+// Run executes the command selected by args (without the program name) and
+// returns the process exit code.
+func (a *App) Run(args []string) int {
+	var g Globals
+	err := a.dispatch(a.Root, []string{a.Root.Name}, args, &g)
+	if err == nil {
+		return 0
+	}
+	e := clierr.From(err)
+	// --json may not have been parsed yet when parsing itself failed, so the
+	// raw arguments are checked too.
+	output.WriteError(a.Stdout, a.Stderr, g.JSON || requestsJSON(args), e)
+	return e.Code.ExitCode()
+}
+
+func (a *App) dispatch(cmd *Command, path, args []string, g *Globals) error {
+	fs := flag.NewFlagSet(strings.Join(path, " "), flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	var local Globals
+	BindGlobalFlags(fs, &local)
+	var showVersion bool
+	if cmd == a.Root {
+		fs.BoolVar(&showVersion, "version", false, "print the version and exit")
+	}
+
+	var rest []string
+	var err error
+	if len(cmd.Subcommands) > 0 {
+		// Groups stop at the first positional argument: it names a subcommand.
+		err = fs.Parse(args)
+		rest = fs.Args()
+	} else {
+		rest, err = parseInterspersed(fs, args)
+	}
+	g.merge(local)
+	if errors.Is(err, flag.ErrHelp) {
+		return a.writeHelp(cmd, path, fs)
+	}
+	if err != nil {
+		return clierr.New(clierr.InvalidArgument, err.Error()).
+			WithHint(fmt.Sprintf("run '%s --help' for usage", strings.Join(path, " ")))
+	}
+	if showVersion {
+		_, err := fmt.Fprintln(a.Stdout, version.String(a.Root.Name))
+		return err
+	}
+
+	if len(cmd.Subcommands) > 0 && len(rest) > 0 {
+		sub := cmd.Find(rest[0])
+		if sub == nil {
+			return clierr.Newf(clierr.InvalidArgument, "unknown command %q for %q", rest[0], strings.Join(path, " ")).
+				WithHint(fmt.Sprintf("run '%s --help' to list commands", strings.Join(path, " ")))
+		}
+		return a.dispatch(sub, append(path, sub.Name), rest[1:], g)
+	}
+	if cmd.Run == nil {
+		return a.writeHelp(cmd, path, fs)
+	}
+
+	env := &Env{Globals: *g, Stdout: a.Stdout, Stderr: a.Stderr}
+	env.NoInput = env.NoInput || !a.StdinIsTerminal
+	env.Input = prompt.New(!env.NoInput, a.Stdin, a.Stderr)
+	return cmd.Run(env, rest)
+}
+
+// parseInterspersed parses flags that appear before, between or after
+// positional arguments, so "forward api --json" works like
+// "forward --json api". Arguments after "--" are always positional.
+func parseInterspersed(fs *flag.FlagSet, args []string) ([]string, error) {
+	var positional []string
+	for {
+		if err := fs.Parse(args); err != nil {
+			return nil, err
+		}
+		rest := fs.Args()
+		consumed := len(args) - len(rest)
+		if consumed > 0 && args[consumed-1] == "--" {
+			return append(positional, rest...), nil
+		}
+		if len(rest) == 0 {
+			return positional, nil
+		}
+		positional = append(positional, rest[0])
+		args = rest[1:]
+	}
+}
+
+// requestsJSON reports whether args contain an enabled --json flag before any
+// "--" terminator.
+func requestsJSON(args []string) bool {
+	for _, arg := range args {
+		if arg == "--" {
+			return false
+		}
+		name, value, hasValue := strings.Cut(strings.TrimLeft(arg, "-"), "=")
+		if !strings.HasPrefix(arg, "-") || name != "json" {
+			continue
+		}
+		if !hasValue {
+			return true
+		}
+		if on, err := strconv.ParseBool(value); err == nil && on {
+			return true
+		}
+	}
+	return false
+}
+
+func (a *App) writeHelp(cmd *Command, path []string, fs *flag.FlagSet) error {
+	var b strings.Builder
+	if cmd.Summary != "" {
+		fmt.Fprintf(&b, "%s\n\n", cmd.Summary)
+	}
+	if cmd.Description != "" {
+		fmt.Fprintf(&b, "%s\n\n", cmd.Description)
+	}
+	name := strings.Join(path, " ")
+	b.WriteString("Usage:\n")
+	if len(cmd.Subcommands) > 0 {
+		fmt.Fprintf(&b, "  %s [flags] <command>\n", name)
+	} else {
+		fmt.Fprintf(&b, "  %s [flags] [args]\n", name)
+	}
+
+	tw := tabwriter.NewWriter(&b, 0, 0, 2, ' ', 0)
+	if len(cmd.Subcommands) > 0 {
+		b.WriteString("\nCommands:\n")
+		for _, sub := range cmd.Subcommands {
+			fmt.Fprintf(tw, "  %s\t%s\n", sub.Name, sub.Summary)
+		}
+		if err := tw.Flush(); err != nil {
+			return fmt.Errorf("formatting help: %w", err)
+		}
+	}
+
+	b.WriteString("\nFlags:\n")
+	fs.VisitAll(func(f *flag.Flag) {
+		valueName, usage := flag.UnquoteUsage(f)
+		if valueName == "value" || valueName == "" {
+			fmt.Fprintf(tw, "  --%s\t%s\n", f.Name, usage)
+			return
+		}
+		fmt.Fprintf(tw, "  --%s <%s>\t%s\n", f.Name, valueName, usage)
+	})
+	fmt.Fprintf(tw, "  -h, --help\tshow help\n")
+	if err := tw.Flush(); err != nil {
+		return fmt.Errorf("formatting help: %w", err)
+	}
+	if len(cmd.Subcommands) > 0 {
+		fmt.Fprintf(&b, "\nRun '%s <command> --help' for more information about a command.\n", name)
+	}
+
+	if _, err := io.WriteString(a.Stdout, b.String()); err != nil {
+		return fmt.Errorf("writing help: %w", err)
+	}
+	return nil
+}
