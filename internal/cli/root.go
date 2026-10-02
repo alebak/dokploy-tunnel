@@ -9,11 +9,7 @@ func NewRoot() *Command {
 		Summary: "doktunnel forwards Dokploy services to stable local hostnames and ports.",
 		Subcommands: []*Command{
 			newContextCommand(),
-			{
-				Name:    "services",
-				Summary: "List Dokploy services that can be forwarded",
-				Run:     notImplemented("services"),
-			},
+			newServicesCommand(),
 			{
 				Name:    "forward",
 				Summary: "Forward a Dokploy service to a stable local hostname and port",

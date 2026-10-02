@@ -9,7 +9,7 @@
 
 ## Status
 
-**Early development.** The release pipeline is in place, but the binaries do not implement tunneling yet. `doktunnel` can register Dokploy panels as [contexts](#contexts); its other commands report `not_implemented`. Expect breaking changes before 1.0.0.
+**Early development.** The release pipeline is in place, but the binaries do not implement tunneling yet. `doktunnel` can register Dokploy panels as [contexts](#contexts) and [list their services](#services); its other commands report `not_implemented`. Expect breaking changes before 1.0.0.
 
 ## Install
 
@@ -46,7 +46,7 @@ Download the archive for your platform from [Releases](https://github.com/alebak
 
 ## Usage
 
-`doktunnel --help` lists the command groups: `context`, `services`, `forward`, `status`, and `hosts`. Only `context` is implemented so far; the others exit with the `not_implemented` error. `doktunnel <command> --help` shows a command's flags, and `doktunnel --version` prints the build version.
+`doktunnel --help` lists the command groups: `context`, `services`, `forward`, `status`, and `hosts`. Only `context` and `services` are implemented so far; the others exit with the `not_implemented` error. `doktunnel <command> --help` shows a command's flags, and `doktunnel --version` prints the build version.
 
 ### Contexts
 
@@ -84,6 +84,45 @@ DOKTUNNEL_API_KEY="$(pass show dokploy/prod)" doktunnel context add --url https:
 **Proxies.** Requests to Dokploy honor the `HTTPS_PROXY`, `HTTP_PROXY`, and `NO_PROXY` environment variables.
 
 With `--json`, `add` and `use` print the context as `{"name","url","organization_id","organization_name","current"}` (plus `warnings` when there are any), `list` prints `{"current_context":"...","contexts":[...]}`, and `remove` prints `{"name":"...","removed":true}`. An invalid key fails with `permission_denied`; a panel that cannot be reached, or that does not answer like Dokploy, fails with `unreachable`.
+
+### Services
+
+`doktunnel services` lists the projects, environments and services the context's API key can see, grouped by project and environment, with each service's type, name, status, default port, and ID:
+
+```sh
+doktunnel services
+doktunnel services --project shop --context staging
+```
+
+```text
+shop (prj_shop)
+  production (default)
+    TYPE         NAME           STATUS   PORT  ID
+    application  web            done     -     app_web
+    postgres     main-db        done     5432  pg_main
+```
+
+Dokploy decides what a key can see: owner and admin keys see the whole organization, member keys only the projects and services they were granted. doktunnel applies no filter of its own. `--project <name or ID>` shows only matching projects and fails with `not_found` when none matches.
+
+The default port is the fixed port Dokploy deploys a database with (postgres 5432, mysql and mariadb 3306, mongo 27017, redis 6379, libsql 8080). Applications and compose services listen wherever their image does, so their port is unknown and shown as `-`.
+
+With `--json`, the result is a stable tree:
+
+```json
+{"context":"prod","projects":[{"id":"prj_shop","name":"shop","environments":[{"id":"env_shop_prod","name":"production","default":true,"services":[{"id":"pg_main","type":"postgres","name":"main-db","status":"done","default_port":5432}]}]}]}
+```
+
+| Field | Meaning |
+|-------|---------|
+| `context` | The context that was used |
+| `projects[].id`, `.name` | The Dokploy project |
+| `environments[].id`, `.name`, `.default` | An environment of the project; `default` marks the one Dokploy opens the project with |
+| `services[].id` | The service ID, unique within its type |
+| `services[].type` | `application`, `compose`, `postgres`, `mysql`, `mariadb`, `mongo`, `redis`, or `libsql` |
+| `services[].name`, `.status` | Display name and deployment status (`idle`, `running`, `done`, or `error`); an empty string when unknown |
+| `services[].default_port` | Container port forwarding targets by default, or `null` when Dokploy does not define one |
+
+Lists are always present, possibly empty. New fields may be added; existing fields keep their meaning.
 
 ### Global flags
 

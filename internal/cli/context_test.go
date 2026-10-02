@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/alebak/dokploy-tunnel/internal/clierr"
@@ -18,18 +19,48 @@ import (
 	"github.com/alebak/dokploy-tunnel/internal/keyring"
 )
 
-// fakeAPI answers Organization with org or err and records how it was built.
+// fakeAPI answers Organization with org or err, Projects with projects or
+// projectsErr, and Details from details or detailErrs, keyed by "type/id".
+// It records how it was built. Details may be called concurrently.
 type fakeAPI struct {
-	org   dokploy.Organization
-	err   error
-	calls int
-	base  string
-	key   string
+	org         dokploy.Organization
+	err         error
+	calls       int
+	base        string
+	key         string
+	projects    []dokploy.Project
+	projectsErr error
+	details     map[string]dokploy.ServiceDetails
+	detailErrs  map[string]error
+
+	mu          sync.Mutex
+	detailCalls []string
 }
 
 func (f *fakeAPI) Organization(context.Context) (dokploy.Organization, error) {
 	f.calls++
 	return f.org, f.err
+}
+
+func (f *fakeAPI) Projects(context.Context) ([]dokploy.Project, error) {
+	return f.projects, f.projectsErr
+}
+
+func (f *fakeAPI) Details(ctx context.Context, typ dokploy.ServiceType, id string) (dokploy.ServiceDetails, error) {
+	key := string(typ) + "/" + id
+	f.mu.Lock()
+	f.detailCalls = append(f.detailCalls, key)
+	f.mu.Unlock()
+	if err := ctx.Err(); err != nil {
+		return dokploy.ServiceDetails{}, err
+	}
+	if err := f.detailErrs[key]; err != nil {
+		return dokploy.ServiceDetails{}, err
+	}
+	if d, ok := f.details[key]; ok {
+		return d, nil
+	}
+	return dokploy.ServiceDetails{}, fmt.Errorf("%w (%s.one)", dokploy.ErrNotFound, typ)
 }
 
 // contextHarness is an App wired to a temp config file, an in-memory keyring
