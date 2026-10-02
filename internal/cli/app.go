@@ -1,15 +1,20 @@
 package cli
 
 import (
+	"bufio"
 	"errors"
 	"flag"
 	"fmt"
 	"io"
+	"net/url"
+	"os"
 	"strconv"
 	"strings"
 	"text/tabwriter"
 
 	"github.com/alebak/dokploy-tunnel/internal/clierr"
+	"github.com/alebak/dokploy-tunnel/internal/dokploy"
+	"github.com/alebak/dokploy-tunnel/internal/keyring"
 	"github.com/alebak/dokploy-tunnel/internal/output"
 	"github.com/alebak/dokploy-tunnel/internal/prompt"
 	"github.com/alebak/dokploy-tunnel/internal/version"
@@ -28,6 +33,17 @@ type App struct {
 	// StdinIsTerminal reports whether prompting is possible at all; when it
 	// is false, --no-input is implied.
 	StdinIsTerminal bool
+	// ConfigPath is the config file; empty means config.DefaultPath().
+	ConfigPath string
+	// Keyring stores API keys. Commands that need it fail when it is nil.
+	Keyring keyring.Keyring
+	// NewAPI returns a Dokploy API client; nil means dokploy.New.
+	NewAPI func(base *url.URL, apiKey string) dokploy.API
+	// ReadSecret reads one line from the terminal without echoing it; nil
+	// means secrets cannot be prompted for.
+	ReadSecret func() (string, error)
+	// Getenv reads environment variables; nil means os.Getenv.
+	Getenv func(key string) string
 }
 
 // Run executes the command selected by args (without the program name) and
@@ -96,10 +112,34 @@ func (a *App) dispatch(cmd *Command, path, args []string, g *Globals) error {
 		return a.writeHelp(cmd, path, fs)
 	}
 
-	env := &Env{Globals: *g, Stdout: a.Stdout, Stderr: a.Stderr}
+	return cmd.Run(a.env(*g), rest)
+}
+
+// env builds the environment a command runs in.
+func (a *App) env(g Globals) *Env {
+	// Prompts and commands that read stdin directly share one buffer, so
+	// neither loses input the other has buffered.
+	stdin := bufio.NewReader(a.Stdin)
+	env := &Env{
+		Globals:    g,
+		Stdin:      stdin,
+		Stdout:     a.Stdout,
+		Stderr:     a.Stderr,
+		ConfigPath: a.ConfigPath,
+		Keyring:    a.Keyring,
+		NewAPI:     a.NewAPI,
+		ReadSecret: a.ReadSecret,
+		Getenv:     a.Getenv,
+	}
 	env.NoInput = env.NoInput || !a.StdinIsTerminal
-	env.Input = prompt.New(!env.NoInput, a.Stdin, a.Stderr)
-	return cmd.Run(env, rest)
+	env.Input = prompt.New(!env.NoInput, stdin, a.Stderr)
+	if env.NewAPI == nil {
+		env.NewAPI = func(base *url.URL, apiKey string) dokploy.API { return dokploy.New(base, apiKey) }
+	}
+	if env.Getenv == nil {
+		env.Getenv = os.Getenv
+	}
+	return env
 }
 
 // parseInterspersed parses flags that appear before, between or after
@@ -158,7 +198,7 @@ func (a *App) writeHelp(cmd *Command, path []string, fs *flag.FlagSet) error {
 	if len(cmd.Subcommands) > 0 {
 		fmt.Fprintf(&b, "  %s [flags] <command>\n", name)
 	} else {
-		fmt.Fprintf(&b, "  %s\n", usageLine(name, cmd.Args))
+		fmt.Fprintf(&b, "  %s\n", usageLine(name, cmd))
 	}
 
 	tw := tabwriter.NewWriter(&b, 0, 0, 2, ' ', 0)
@@ -195,11 +235,16 @@ func (a *App) writeHelp(cmd *Command, path []string, fs *flag.FlagSet) error {
 	return nil
 }
 
-// usageLine renders the usage of a leaf command called name that takes the
-// positional arguments args.
-func usageLine(name, args string) string {
-	if args == "" {
-		args = "[args]"
+// usageLine renders the usage of the leaf command cmd invoked as name. A
+// command that declares neither flags nor arguments may still take any
+// arguments, so it shows a generic placeholder.
+func usageLine(name string, cmd *Command) string {
+	switch {
+	case cmd.Args != "":
+		return name + " [flags] " + cmd.Args
+	case cmd.Flags != nil:
+		return name + " [flags]"
+	default:
+		return name + " [flags] [args]"
 	}
-	return name + " [flags] " + args
 }

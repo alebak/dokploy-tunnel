@@ -8,7 +8,10 @@ package cli
 import (
 	"flag"
 	"io"
+	"net/url"
 
+	"github.com/alebak/dokploy-tunnel/internal/dokploy"
+	"github.com/alebak/dokploy-tunnel/internal/keyring"
 	"github.com/alebak/dokploy-tunnel/internal/prompt"
 )
 
@@ -76,10 +79,22 @@ type Env struct {
 	// Globals are the effective global flags; NoInput already accounts for a
 	// non-terminal stdin.
 	Globals
+	// Stdin is the standard input, shared with Input.
+	Stdin io.Reader
 	// Stdout receives command results.
 	Stdout io.Writer
 	// Stderr receives diagnostics and prompts.
 	Stderr io.Writer
 	// Input obtains values the user did not pass as flags.
 	Input prompt.Input
+	// ConfigPath is the config file; empty means config.DefaultPath().
+	ConfigPath string
+	// Keyring stores API keys; it may be nil when none is available.
+	Keyring keyring.Keyring
+	// NewAPI returns a Dokploy API client for a panel and API key.
+	NewAPI func(base *url.URL, apiKey string) dokploy.API
+	// ReadSecret reads a line without echo; nil means it is not possible.
+	ReadSecret func() (string, error)
+	// Getenv reads environment variables.
+	Getenv func(key string) string
 }

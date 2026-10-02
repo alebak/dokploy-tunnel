@@ -94,7 +94,7 @@ func TestRun_CommandHelp(t *testing.T) {
 }
 
 func TestRun_UnimplementedCommandsReturnNotImplemented(t *testing.T) {
-	for _, name := range []string{"context", "services", "forward", "status", "hosts"} {
+	for _, name := range []string{"services", "forward", "status", "hosts"} {
 		variants := [][]string{
 			{name, "--json", "--no-input"},
 			{"--json", name, "--context", "prod"},
