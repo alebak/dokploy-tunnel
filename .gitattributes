@@ -1,0 +1,2 @@
+# Keep LF everywhere so golden files and fixtures compare byte-for-byte on Windows CI.
+* text=auto eol=lf
