@@ -1,0 +1,15 @@
+shop (prj_shop)
+  production (default)
+    TYPE         NAME           STATUS   PORT  ID
+    application  web            done     -     app_web
+    compose      observability  running  -     cmp_stack
+    postgres     -              -        5432  pg_main
+    redis        cache          error    6379  redis_cache
+  staging
+    TYPE     NAME       STATUS  PORT  ID
+    mariadb  legacy-db  idle    3306  maria_stg
+  preview
+    no services
+
+empty (prj_empty)
+  no environments

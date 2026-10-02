@@ -110,10 +110,7 @@ func decodeDetails(spec serviceSpec, id string, body json.RawMessage) (ServiceDe
 		return ServiceDetails{}, err
 	}
 	d.Ports = ports
-	d.DefaultPort = UnknownPort
-	if isDatabase(spec.typ) {
-		d.DefaultPort = ports[0].Target
-	}
+	d.DefaultPort = DefaultPort(spec.typ)
 
 	for _, rd := range raw.Domains {
 		dom := Domain{Host: rd.Host}
@@ -147,12 +144,6 @@ func decodeDetails(spec serviceSpec, id string, body json.RawMessage) (ServiceDe
 	return d, nil
 }
 
-// isDatabase reports whether Dokploy deploys typ from a database image that
-// listens on a fixed port.
-func isDatabase(typ ServiceType) bool {
-	return typ != ServiceApplication && typ != ServiceCompose
-}
-
 // servicePorts returns the container ports Dokploy configures for a service.
 // Databases listen on the fixed ports Dokploy's builders in
 // packages/server/src/utils/databases/ map their external ports to;
@@ -160,18 +151,12 @@ func isDatabase(typ ServiceType) bool {
 func servicePorts(typ ServiceType, raw rawDetails) ([]Port, error) {
 	var ports []Port
 	switch typ {
-	case ServicePostgres:
-		ports = []Port{{Target: 5432, Published: deref(raw.ExternalPort), Protocol: "tcp"}}
-	case ServiceMySQL, ServiceMariaDB:
-		ports = []Port{{Target: 3306, Published: deref(raw.ExternalPort), Protocol: "tcp"}}
-	case ServiceMongo:
-		ports = []Port{{Target: 27017, Published: deref(raw.ExternalPort), Protocol: "tcp"}}
-	case ServiceRedis:
-		ports = []Port{{Target: 6379, Published: deref(raw.ExternalPort), Protocol: "tcp"}}
+	case ServicePostgres, ServiceMySQL, ServiceMariaDB, ServiceMongo, ServiceRedis:
+		ports = []Port{{Target: DefaultPort(typ), Published: deref(raw.ExternalPort), Protocol: "tcp"}}
 	case ServiceLibSQL:
 		// The HTTP port comes first: it is the one libSQL clients use.
 		ports = []Port{
-			{Name: "http", Target: 8080, Published: deref(raw.ExternalPort), Protocol: "tcp"},
+			{Name: "http", Target: DefaultPort(typ), Published: deref(raw.ExternalPort), Protocol: "tcp"},
 			{Name: "grpc", Target: 5001, Published: deref(raw.ExternalGRPCPort), Protocol: "tcp"},
 			{Name: "admin", Target: 5000, Published: deref(raw.ExternalAdminPort), Protocol: "tcp"},
 		}

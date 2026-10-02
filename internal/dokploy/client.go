@@ -51,7 +51,11 @@ type API interface {
 	// Organization returns the organization the API key is bound to. It
 	// fails with ErrUnauthorized, ErrUnreachable or ErrUnexpectedResponse.
 	Organization(ctx context.Context) (Organization, error)
+	Catalog
+	Detailer
 }
+
+var _ API = (*Client)(nil)
 
 // ParseBaseURL validates and normalizes a panel URL such as
 // https://dokploy.example.com or http://192.168.1.20:3000. Any port and path

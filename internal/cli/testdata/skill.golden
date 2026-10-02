@@ -57,6 +57,16 @@ Usage: `doktunnel context remove [flags] <name>`
 
 Removing the current context leaves no context current. The API key stays valid in Dokploy; revoke it there if it is no longer needed. JSON output: `{"name":"<name>","removed":true}`.
 
+### `doktunnel services`
+
+Usage: `doktunnel services [flags]`
+
+Lists the projects, environments and services the context's API key can see; Dokploy decides what a key can see, and doktunnel applies no filter of its own. JSON output: `{"context":"<name>","projects":[...]}`, where each project has `id`, `name` and `environments`; each environment has `id`, `name`, `default` and `services`; and each service has `id`, `type`, `name`, `status` and `default_port`. `default_port` is null when Dokploy does not define it, as for applications and compose services, and `name` or `status` are empty when unknown.
+
+| Flag | Purpose |
+|------|---------|
+| `--project <name or ID>` | show only the project with this name or ID |
+
 ## Global flags
 
 Every command accepts these flags, before or after its arguments:

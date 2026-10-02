@@ -239,3 +239,27 @@ func TestClient_DetailsWrongKey(t *testing.T) {
 		t.Errorf("err = %v, want ErrUnauthorized", err)
 	}
 }
+
+func TestDefaultPort_PerType(t *testing.T) {
+	want := map[ServiceType]int{
+		ServiceApplication:   UnknownPort,
+		ServiceCompose:       UnknownPort,
+		ServicePostgres:      5432,
+		ServiceMySQL:         3306,
+		ServiceMariaDB:       3306,
+		ServiceMongo:         27017,
+		ServiceRedis:         6379,
+		ServiceLibSQL:        8080,
+		ServiceType("bogus"): UnknownPort,
+	}
+	for typ, port := range want {
+		if got := DefaultPort(typ); got != port {
+			t.Errorf("DefaultPort(%s) = %d, want %d", typ, got, port)
+		}
+	}
+	for _, typ := range ServiceTypes() {
+		if _, ok := want[typ]; !ok {
+			t.Errorf("no expected default port for %s", typ)
+		}
+	}
+}

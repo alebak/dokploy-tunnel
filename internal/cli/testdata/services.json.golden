@@ -1,0 +1,72 @@
+{
+  "context": "prod",
+  "projects": [
+    {
+      "id": "prj_shop",
+      "name": "shop",
+      "environments": [
+        {
+          "id": "env_shop_prod",
+          "name": "production",
+          "default": true,
+          "services": [
+            {
+              "id": "app_web",
+              "type": "application",
+              "name": "web",
+              "status": "done",
+              "default_port": null
+            },
+            {
+              "id": "cmp_stack",
+              "type": "compose",
+              "name": "observability",
+              "status": "running",
+              "default_port": null
+            },
+            {
+              "id": "pg_main",
+              "type": "postgres",
+              "name": "",
+              "status": "",
+              "default_port": 5432
+            },
+            {
+              "id": "redis_cache",
+              "type": "redis",
+              "name": "cache",
+              "status": "error",
+              "default_port": 6379
+            }
+          ]
+        },
+        {
+          "id": "env_shop_stg",
+          "name": "staging",
+          "default": false,
+          "services": [
+            {
+              "id": "maria_stg",
+              "type": "mariadb",
+              "name": "legacy-db",
+              "status": "idle",
+              "default_port": 3306
+            }
+          ]
+        },
+        {
+          "id": "env_shop_preview",
+          "name": "preview",
+          "default": false,
+          "services": []
+        }
+      ]
+    },
+    {
+      "id": "prj_empty",
+      "name": "empty",
+      "environments": []
+    }
+  ]
+}
+

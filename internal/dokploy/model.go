@@ -126,6 +126,26 @@ type ServiceDetails struct {
 // define.
 const UnknownPort = 0
 
+// DefaultPort returns the container port forwarding targets by default for a
+// service of type typ: the fixed port Dokploy deploys a database with, or
+// UnknownPort for applications, compose services and unknown types. libSQL
+// reports its HTTP port, the one libSQL clients use.
+func DefaultPort(typ ServiceType) int {
+	switch typ {
+	case ServicePostgres:
+		return 5432
+	case ServiceMySQL, ServiceMariaDB:
+		return 3306
+	case ServiceMongo:
+		return 27017
+	case ServiceRedis:
+		return 6379
+	case ServiceLibSQL:
+		return 8080
+	}
+	return UnknownPort
+}
+
 // Port is a container port of a service.
 type Port struct {
 	// Name tells apart the ports of a service that has several, such as
