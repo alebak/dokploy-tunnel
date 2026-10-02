@@ -16,7 +16,8 @@ import (
 )
 
 // servicesFixture is what project.all returns for an owner key: databases
-// such as pg_main come without name and status.
+// such as pg_main come without name and status, and compose stacks such as
+// cmp_myapp without the services inside them.
 func servicesFixture() []dokploy.Project {
 	return []dokploy.Project{
 		{
@@ -35,6 +36,7 @@ func servicesFixture() []dokploy.Project {
 					ID: "env_shop_stg", Name: "staging",
 					Services: []dokploy.Service{
 						{ID: "maria_stg", Type: dokploy.ServiceMariaDB, Name: "legacy-db", Status: "idle"},
+						{ID: "cmp_myapp", Type: dokploy.ServiceCompose, Name: "myapp", Status: "done"},
 						{ID: "libsql_edge", Type: dokploy.ServiceLibSQL},
 					},
 				},
@@ -58,6 +60,11 @@ func newServicesHarness(t *testing.T) *contextHarness {
 	h.api.detailErrs = map[string]error{
 		"libsql/libsql_edge": fmt.Errorf("%w (HTTP 401 from libsql.one)", dokploy.ErrUnauthorized),
 	}
+	// cmp_myapp has a cached compose file; cmp_stack has none yet.
+	h.api.composeServices = map[string][]string{"cmp_myapp": {"postgres", "pgadmin"}}
+	h.api.composeErrs = map[string]error{
+		"cmp_stack": fmt.Errorf("%w (compose.loadServices)", dokploy.ErrNotFound),
+	}
 	return h
 }
 
@@ -79,7 +86,8 @@ func TestServices_Golden(t *testing.T) {
 		golden     string
 		wantStderr string
 	}{
-		{"human", nil, "services.golden", "warning: libsql libsql_edge: name and status unknown: " +
+		{"human", nil, "services.golden", "warning: compose cmp_stack: " + noCachedComposeFile + "\n" +
+			"warning: libsql libsql_edge: name and status unknown: " +
 			"Dokploy rejected the API key (HTTP 401 from libsql.one)\n"},
 		// In JSON mode the warning is part of the service instead.
 		{"json", []string{"--json"}, "services.json.golden", ""},
@@ -254,5 +262,106 @@ func TestFillServiceDetails_Canceled(t *testing.T) {
 	}
 	if len(api.detailCalls) != 0 {
 		t.Errorf("detail calls = %v after cancellation, want none", api.detailCalls)
+	}
+}
+
+func TestServices_ComposeServicesOnlyForComposes(t *testing.T) {
+	h := newServicesHarness(t)
+	h.mustRun("", "services", "--json")
+	got := map[string]bool{}
+	for _, id := range h.api.composeCalls {
+		got[id] = true
+	}
+	want := map[string]bool{"cmp_stack": true, "cmp_myapp": true}
+	if fmt.Sprint(got) != fmt.Sprint(want) || len(h.api.composeCalls) != len(want) {
+		t.Errorf("compose calls = %v, want one each for %v", h.api.composeCalls, want)
+	}
+}
+
+// A compose stack whose services cannot be read is still listed, with a
+// warning, and does not fail the command.
+func TestServices_ComposeServicesWarning(t *testing.T) {
+	tests := []struct {
+		name string
+		err  error
+		want string
+	}{
+		{"no access", fmt.Errorf("%w (HTTP 401 from compose.loadServices)", dokploy.ErrUnauthorized),
+			"internal services unknown: Dokploy rejected the API key (HTTP 401 from compose.loadServices)"},
+		{"no cached compose file", fmt.Errorf("%w (compose.loadServices)", dokploy.ErrNotFound), noCachedComposeFile},
+		{"unreachable", dokploy.ErrUnreachable, "internal services unknown: Dokploy panel is unreachable"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			h := newServicesHarness(t)
+			h.api.composeErrs = map[string]error{"cmp_myapp": tt.err}
+
+			r := h.mustRun("", "services", "--json", "--project", "shop")
+			var compose *serviceJSON
+			for _, e := range decodeJSON[servicesJSON](t, r.stdout).Projects[0].Environments {
+				for i, s := range e.Services {
+					if s.ID == "cmp_myapp" {
+						compose = &e.Services[i]
+					}
+					if s.Parent == "cmp_myapp" {
+						t.Errorf("internal service %+v listed, want none", s)
+					}
+				}
+			}
+			if compose == nil || compose.Warning != tt.want {
+				t.Errorf("compose = %+v, want it listed with warning %q", compose, tt.want)
+			}
+
+			r = h.mustRun("", "services", "--project", "shop")
+			if want := "warning: compose cmp_myapp: " + tt.want + "\n"; !strings.Contains(r.stderr, want) {
+				t.Errorf("stderr = %q, want it to contain %q", r.stderr, want)
+			}
+		})
+	}
+}
+
+func TestListComposeServices_Canceled(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	api := &fakeAPI{}
+	if _, _, err := listComposeServices(ctx, api, manyComposes(10)); !errors.Is(err, context.Canceled) {
+		t.Errorf("err = %v, want context.Canceled", err)
+	}
+	if len(api.composeCalls) != 0 {
+		t.Errorf("compose calls = %v after cancellation, want none", api.composeCalls)
+	}
+}
+
+func (d *slowDetailer) ComposeServices(ctx context.Context, composeID string) ([]string, error) {
+	d.mu.Lock()
+	d.inFlight++
+	d.max = max(d.max, d.inFlight)
+	d.mu.Unlock()
+	time.Sleep(5 * time.Millisecond)
+	d.mu.Lock()
+	d.inFlight--
+	d.mu.Unlock()
+	return []string{"postgres"}, nil
+}
+
+func manyComposes(n int) []dokploy.Project {
+	env := dokploy.Environment{ID: "env", Name: "production"}
+	for i := range n {
+		env.Services = append(env.Services, dokploy.Service{ID: fmt.Sprintf("cmp_%d", i), Type: dokploy.ServiceCompose, Name: "c", Status: "done"})
+	}
+	return []dokploy.Project{{ID: "prj", Name: "p", Environments: []dokploy.Environment{env}}}
+}
+
+func TestListComposeServices_BoundsConcurrency(t *testing.T) {
+	d := &slowDetailer{}
+	names, warnings, err := listComposeServices(context.Background(), d, manyComposes(3*detailConcurrency))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(warnings) != 0 || len(names) != 3*detailConcurrency {
+		t.Errorf("got %d compose results and warnings %v, want %d results and none", len(names), warnings, 3*detailConcurrency)
+	}
+	if d.max > detailConcurrency {
+		t.Errorf("%d compose calls in flight, want at most %d", d.max, detailConcurrency)
 	}
 }

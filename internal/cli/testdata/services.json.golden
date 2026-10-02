@@ -13,6 +13,7 @@
             {
               "id": "app_web",
               "type": "application",
+              "kind": "service",
               "name": "web",
               "status": "done",
               "default_port": null
@@ -20,13 +21,16 @@
             {
               "id": "cmp_stack",
               "type": "compose",
+              "kind": "service",
               "name": "observability",
               "status": "running",
-              "default_port": null
+              "default_port": null,
+              "warning": "internal services unknown: Dokploy has no compose file cached for it yet; deploy it once"
             },
             {
               "id": "pg_main",
               "type": "postgres",
+              "kind": "service",
               "name": "main-db",
               "status": "done",
               "default_port": 5432
@@ -34,6 +38,7 @@
             {
               "id": "redis_cache",
               "type": "redis",
+              "kind": "service",
               "name": "cache",
               "status": "error",
               "default_port": 6379
@@ -48,13 +53,43 @@
             {
               "id": "maria_stg",
               "type": "mariadb",
+              "kind": "service",
               "name": "legacy-db",
               "status": "idle",
               "default_port": 3306
             },
             {
+              "id": "cmp_myapp",
+              "type": "compose",
+              "kind": "service",
+              "name": "myapp",
+              "status": "done",
+              "default_port": null
+            },
+            {
+              "id": "cmp_myapp/postgres",
+              "type": "compose_service",
+              "kind": "compose_service",
+              "name": "myapp/postgres",
+              "status": "",
+              "default_port": null,
+              "parent": "cmp_myapp",
+              "service": "postgres"
+            },
+            {
+              "id": "cmp_myapp/pgadmin",
+              "type": "compose_service",
+              "kind": "compose_service",
+              "name": "myapp/pgadmin",
+              "status": "",
+              "default_port": null,
+              "parent": "cmp_myapp",
+              "service": "pgadmin"
+            },
+            {
               "id": "libsql_edge",
               "type": "libsql",
+              "kind": "service",
               "name": "",
               "status": "",
               "default_port": 8080,

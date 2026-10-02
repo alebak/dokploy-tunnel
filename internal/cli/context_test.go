@@ -20,8 +20,10 @@ import (
 )
 
 // fakeAPI answers Organization with org or err, Projects with projects or
-// projectsErr, and Details from details or detailErrs, keyed by "type/id".
-// It records how it was built. Details may be called concurrently.
+// projectsErr, Details from details or detailErrs, keyed by "type/id", and
+// ComposeServices from composeServices or composeErrs, keyed by compose ID.
+// It records how it was built. Details and ComposeServices may be called
+// concurrently.
 type fakeAPI struct {
 	org         dokploy.Organization
 	err         error
@@ -33,8 +35,12 @@ type fakeAPI struct {
 	details     map[string]dokploy.ServiceDetails
 	detailErrs  map[string]error
 
-	mu          sync.Mutex
-	detailCalls []string
+	composeServices map[string][]string
+	composeErrs     map[string]error
+
+	mu           sync.Mutex
+	detailCalls  []string
+	composeCalls []string
 }
 
 func (f *fakeAPI) Organization(context.Context) (dokploy.Organization, error) {
@@ -61,6 +67,22 @@ func (f *fakeAPI) Details(ctx context.Context, typ dokploy.ServiceType, id strin
 		return d, nil
 	}
 	return dokploy.ServiceDetails{}, fmt.Errorf("%w (%s.one)", dokploy.ErrNotFound, typ)
+}
+
+func (f *fakeAPI) ComposeServices(ctx context.Context, composeID string) ([]string, error) {
+	f.mu.Lock()
+	f.composeCalls = append(f.composeCalls, composeID)
+	f.mu.Unlock()
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if err := f.composeErrs[composeID]; err != nil {
+		return nil, err
+	}
+	if names, ok := f.composeServices[composeID]; ok {
+		return names, nil
+	}
+	return nil, fmt.Errorf("%w (compose.loadServices)", dokploy.ErrNotFound)
 }
 
 // contextHarness is an App wired to a temp config file, an in-memory keyring

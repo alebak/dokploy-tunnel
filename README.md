@@ -87,7 +87,7 @@ With `--json`, `add` and `use` print the context as `{"name","url","organization
 
 ### Services
 
-`doktunnel services` lists the projects, environments and services the context's API key can see, grouped by project and environment, with each service's type, name, status, default port, and ID:
+`doktunnel services` lists the projects, environments and services the context's API key can see, grouped by project and environment, with each service's type, name, status, default port, and ID. The services inside a compose stack are listed indented under it, named `<compose>/<service>`:
 
 ```sh
 doktunnel services
@@ -97,19 +97,26 @@ doktunnel services --project shop --context staging
 ```text
 shop (prj_shop)
   production (default)
-    TYPE         NAME           STATUS   PORT  ID
-    application  web            done     -     app_web
-    postgres     main-db        done     5432  pg_main
+    TYPE               NAME            STATUS  PORT  ID
+    application        web             done    -     app_web
+    compose            myapp           done    -     cmp_myapp
+      compose_service  myapp/postgres  -       -     cmp_myapp/postgres
+      compose_service  myapp/pgadmin   -       -     cmp_myapp/pgadmin
+    postgres           main-db         done    5432  pg_main
 ```
+
+**Visibility.** What you see is what the user behind the API key can access. Dokploy enforces it per service, and doktunnel only calls endpoints that check the key's access to each project or service it reads; it never uses organization-wide or Docker-wide listings.
 
 Dokploy decides what a key can see: owner and admin keys see the whole organization, member keys only the projects and services they were granted. doktunnel applies no filter of its own. For owner and admin keys, Dokploy's project list leaves out database names and statuses, so doktunnel reads them from each database (a few requests at a time); if one of those requests fails, the service is still listed by its ID and a warning is printed to stderr. `--project <name or ID>` shows only matching projects and fails with `not_found` when none matches.
 
-The default port is the fixed port Dokploy deploys a database with (postgres 5432, mysql and mariadb 3306, mongo 27017, redis 6379, libsql 8080). Applications and compose services listen wherever their image does, so their port is unknown and shown as `-`.
+The services inside a compose stack come from the compose file Dokploy has stored on the server for that stack (`compose.loadServices` with `type=cache`; doktunnel never asks Dokploy to fetch the source again). A stack the key cannot read, or one that has no compose file on the server yet because it was never deployed, is still listed, with a warning on stderr (or in its `warning` field with `--json`), and the command does not fail.
+
+The default port is the fixed port Dokploy deploys a database with (postgres 5432, mysql and mariadb 3306, mongo 27017, redis 6379, libsql 8080). Applications, compose stacks and the services inside them listen wherever their image does, so their port is unknown and shown as `-`. Compose services also have no status of their own (`-`); see their stack's status instead.
 
 With `--json`, the result is a stable tree:
 
 ```json
-{"context":"prod","projects":[{"id":"prj_shop","name":"shop","environments":[{"id":"env_shop_prod","name":"production","default":true,"services":[{"id":"pg_main","type":"postgres","name":"main-db","status":"done","default_port":5432}]}]}]}
+{"context":"prod","projects":[{"id":"prj_shop","name":"shop","environments":[{"id":"env_shop_prod","name":"production","default":true,"services":[{"id":"cmp_myapp","type":"compose","kind":"service","name":"myapp","status":"done","default_port":null},{"id":"cmp_myapp/postgres","type":"compose_service","kind":"compose_service","name":"myapp/postgres","status":"","default_port":null,"parent":"cmp_myapp","service":"postgres"},{"id":"pg_main","type":"postgres","kind":"service","name":"main-db","status":"done","default_port":5432}]}]}]}
 ```
 
 | Field | Meaning |
@@ -117,11 +124,14 @@ With `--json`, the result is a stable tree:
 | `context` | The context that was used |
 | `projects[].id`, `.name` | The Dokploy project |
 | `environments[].id`, `.name`, `.default` | An environment of the project; `default` marks the one Dokploy opens the project with |
-| `services[].id` | The service ID, unique within its type |
-| `services[].type` | `application`, `compose`, `postgres`, `mysql`, `mariadb`, `mongo`, `redis`, or `libsql` |
-| `services[].name`, `.status` | Display name and deployment status (`idle`, `running`, `done`, or `error`); an empty string when unknown |
-| `services[].default_port` | Container port forwarding targets by default, or `null` when Dokploy does not define one |
-| `services[].warning` | Why `name` and `status` are unknown; present only then |
+| `services[].id` | The service ID, unique within its type; `<compose ID>/<service>` for a compose service |
+| `services[].type` | `application`, `compose`, `postgres`, `mysql`, `mariadb`, `mongo`, `redis`, or `libsql`; `compose_service` for a service inside a compose stack |
+| `services[].kind` | `service` for a service Dokploy manages, `compose_service` for a service inside a compose stack; compose services follow their stack in the list |
+| `services[].name`, `.status` | Display name and deployment status (`idle`, `running`, `done`, or `error`); an empty string when unknown. A compose service is named `<compose name>/<service>` and has no status of its own |
+| `services[].default_port` | Container port forwarding targets by default, or `null` when Dokploy does not define one, as for compose services |
+| `services[].parent` | The ID of the compose stack a compose service belongs to; present only for compose services |
+| `services[].service` | The service's name in the compose file; present only for compose services |
+| `services[].warning` | What is unknown and why: `name` and `status` that could not be read, or, on a compose stack, internal services that could not be read; present only then |
 
 Lists are always present, possibly empty. New fields may be added; existing fields keep their meaning.
 
