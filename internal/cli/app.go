@@ -54,6 +54,9 @@ func (a *App) dispatch(cmd *Command, path, args []string, g *Globals) error {
 	if cmd == a.Root {
 		bindRootFlags(fs, &root)
 	}
+	if cmd.Flags != nil {
+		cmd.Flags(fs)
+	}
 
 	var rest []string
 	var err error
@@ -155,7 +158,7 @@ func (a *App) writeHelp(cmd *Command, path []string, fs *flag.FlagSet) error {
 	if len(cmd.Subcommands) > 0 {
 		fmt.Fprintf(&b, "  %s [flags] <command>\n", name)
 	} else {
-		fmt.Fprintf(&b, "  %s [flags] [args]\n", name)
+		fmt.Fprintf(&b, "  %s\n", usageLine(name, cmd.Args))
 	}
 
 	tw := tabwriter.NewWriter(&b, 0, 0, 2, ' ', 0)
@@ -190,4 +193,13 @@ func (a *App) writeHelp(cmd *Command, path []string, fs *flag.FlagSet) error {
 		return fmt.Errorf("writing help: %w", err)
 	}
 	return nil
+}
+
+// usageLine renders the usage of a leaf command called name that takes the
+// positional arguments args.
+func usageLine(name, args string) string {
+	if args == "" {
+		args = "[args]"
+	}
+	return name + " [flags] " + args
 }

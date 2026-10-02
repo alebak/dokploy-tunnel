@@ -67,6 +67,11 @@ func TestRun_SkillFollowsCommandTree(t *testing.T) {
 		Summary: "Manage widgets",
 		Subcommands: []*Command{
 			{Name: "spin", Summary: "Spin a widget", Description: "Spins until stopped.", Run: notImplemented("spin")},
+			{
+				Name: "paint", Summary: "Paint a widget", Args: "<name>",
+				Flags: func(fs *flag.FlagSet) { fs.String("color", "", "paint `color`") },
+				Run:   notImplemented("paint"),
+			},
 		},
 	})
 	r := run(t, root, "", false, "--skill")
@@ -77,6 +82,8 @@ func TestRun_SkillFollowsCommandTree(t *testing.T) {
 		"| `doktunnel widget` | Manage widgets |",
 		"| `doktunnel widget spin` | Spin a widget |",
 		"Spins until stopped.",
+		"Usage: `doktunnel widget paint [flags] <name>`",
+		"| `--color <color>` | paint color |",
 	} {
 		if !strings.Contains(r.stdout, want) {
 			t.Errorf("skill does not contain %q:\n%s", want, r.stdout)

@@ -41,10 +41,18 @@ func SkillSpec(root *Command) skill.Spec {
 func skillCommands(dst []skill.Command, path []string, cmds []*Command) []skill.Command {
 	for _, c := range cmds {
 		p := append(path[:len(path):len(path)], c.Name)
+		var flags []skill.Flag
+		if c.Flags != nil {
+			fs := flag.NewFlagSet(c.Name, flag.ContinueOnError)
+			c.Flags(fs)
+			flags = skillFlags(fs)
+		}
 		dst = append(dst, skill.Command{
 			Path:        strings.Join(p, " "),
 			Summary:     c.Summary,
 			Description: c.Description,
+			Args:        c.Args,
+			Flags:       flags,
 		})
 		dst = skillCommands(dst, p, c.Subcommands)
 	}

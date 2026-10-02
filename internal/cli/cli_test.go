@@ -3,6 +3,7 @@ package cli
 import (
 	"bytes"
 	"encoding/json"
+	"flag"
 	"fmt"
 	"strings"
 	"testing"
@@ -236,5 +237,79 @@ func TestRun_FlagsAfterDoubleDashArePositional(t *testing.T) {
 	}
 	if want := []string{"a", "--json", "b"}; strings.Join(gotArgs, ",") != strings.Join(want, ",") {
 		t.Errorf("args = %q, want %q", gotArgs, want)
+	}
+}
+
+// flagRoot builds a tree with a leaf that declares its own flags.
+func flagRoot(gotURL *string, gotForce *bool, gotArgs *[]string) *Command {
+	var url string
+	var force bool
+	return &Command{Name: "doktunnel", Subcommands: []*Command{
+		{
+			Name: "add", Summary: "Add a thing", Args: "<name>",
+			Flags: func(fs *flag.FlagSet) {
+				fs.StringVar(&url, "url", "", "panel `URL`")
+				fs.BoolVar(&force, "force", false, "overwrite")
+			},
+			Run: func(env *Env, args []string) error {
+				*gotURL, *gotForce, *gotArgs = url, force, args
+				return nil
+			},
+		},
+		{Name: "other", Summary: "Another thing", Run: func(*Env, []string) error { return nil }},
+	}}
+}
+
+func TestRun_CommandFlags(t *testing.T) {
+	tests := []struct {
+		name      string
+		args      []string
+		wantURL   string
+		wantForce bool
+		wantArgs  []string
+	}{
+		{"flags after args", []string{"add", "x", "--url", "http://h", "--force"}, "http://h", true, []string{"x"}},
+		{"flags before args", []string{"add", "--url=http://h", "x", "--json"}, "http://h", false, []string{"x"}},
+		{"defaults", []string{"add", "x"}, "", false, []string{"x"}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var url string
+			var force bool
+			var args []string
+			r := run(t, flagRoot(&url, &force, &args), "", false, tt.args...)
+			if r.exit != 0 {
+				t.Fatalf("exit = %d, want 0 (stdout %q stderr %q)", r.exit, r.stdout, r.stderr)
+			}
+			if url != tt.wantURL || force != tt.wantForce || strings.Join(args, ",") != strings.Join(tt.wantArgs, ",") {
+				t.Errorf("got url=%q force=%v args=%q, want url=%q force=%v args=%q",
+					url, force, args, tt.wantURL, tt.wantForce, tt.wantArgs)
+			}
+		})
+	}
+}
+
+func TestRun_CommandFlagsAreLocal(t *testing.T) {
+	var url string
+	var force bool
+	var args []string
+	r := run(t, flagRoot(&url, &force, &args), "", false, "other", "--url", "x", "--json")
+	if e := decodeError(t, r.stdout); e.Code != clierr.InvalidArgument {
+		t.Errorf("code = %q, want %q: a flag of one command must not be accepted by another", e.Code, clierr.InvalidArgument)
+	}
+}
+
+func TestRun_CommandHelpListsFlagsAndArgs(t *testing.T) {
+	var url string
+	var force bool
+	var args []string
+	r := run(t, flagRoot(&url, &force, &args), "", true, "add", "--help")
+	if r.exit != 0 {
+		t.Fatalf("exit = %d, want 0", r.exit)
+	}
+	for _, want := range []string{"doktunnel add [flags] <name>", "--url <URL>", "--force", "--json"} {
+		if !strings.Contains(r.stdout, want) {
+			t.Errorf("help does not contain %q:\n%s", want, r.stdout)
+		}
 	}
 }
