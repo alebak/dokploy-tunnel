@@ -102,7 +102,7 @@ shop (prj_shop)
     postgres     main-db        done     5432  pg_main
 ```
 
-Dokploy decides what a key can see: owner and admin keys see the whole organization, member keys only the projects and services they were granted. doktunnel applies no filter of its own. `--project <name or ID>` shows only matching projects and fails with `not_found` when none matches.
+Dokploy decides what a key can see: owner and admin keys see the whole organization, member keys only the projects and services they were granted. doktunnel applies no filter of its own. For owner and admin keys, Dokploy's project list leaves out database names and statuses, so doktunnel reads them from each database (a few requests at a time); if one of those requests fails, the service is still listed by its ID and a warning is printed to stderr. `--project <name or ID>` shows only matching projects and fails with `not_found` when none matches.
 
 The default port is the fixed port Dokploy deploys a database with (postgres 5432, mysql and mariadb 3306, mongo 27017, redis 6379, libsql 8080). Applications and compose services listen wherever their image does, so their port is unknown and shown as `-`.
 
@@ -121,6 +121,7 @@ With `--json`, the result is a stable tree:
 | `services[].type` | `application`, `compose`, `postgres`, `mysql`, `mariadb`, `mongo`, `redis`, or `libsql` |
 | `services[].name`, `.status` | Display name and deployment status (`idle`, `running`, `done`, or `error`); an empty string when unknown |
 | `services[].default_port` | Container port forwarding targets by default, or `null` when Dokploy does not define one |
+| `services[].warning` | Why `name` and `status` are unknown; present only then |
 
 Lists are always present, possibly empty. New fields may be added; existing fields keep their meaning.
 
