@@ -27,8 +27,8 @@
             {
               "id": "pg_main",
               "type": "postgres",
-              "name": "",
-              "status": "",
+              "name": "main-db",
+              "status": "done",
               "default_port": 5432
             },
             {
@@ -51,6 +51,14 @@
               "name": "legacy-db",
               "status": "idle",
               "default_port": 3306
+            },
+            {
+              "id": "libsql_edge",
+              "type": "libsql",
+              "name": "",
+              "status": "",
+              "default_port": 8080,
+              "warning": "name and status unknown: Dokploy rejected the API key (HTTP 401 from libsql.one)"
             }
           ]
         },
