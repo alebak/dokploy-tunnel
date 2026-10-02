@@ -86,3 +86,25 @@ func TestMeanings_CoverEveryCode(t *testing.T) {
 		}
 	}
 }
+
+func TestWrite_CommandUsageAndFlags(t *testing.T) {
+	s := sampleSpec()
+	s.Commands = append(s.Commands, Command{
+		Path:    "doktunnel widget paint",
+		Summary: "Paint a widget",
+		Args:    "<name>",
+		Flags:   []Flag{{Name: "color", Arg: "name", Usage: "paint color"}, {Name: "dry-run", Usage: "only print"}},
+	})
+	got := render(t, s)
+	for _, want := range []string{
+		"### `doktunnel widget paint`\n\nUsage: `doktunnel widget paint [flags] <name>`\n\n",
+		"| `--color <name>` | paint color |\n| `--dry-run` | only print |\n",
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("output does not contain %q:\n%s", want, got)
+		}
+	}
+	if strings.Contains(got, "### `doktunnel status`") {
+		t.Errorf("a command without description, args or flags must not get a section:\n%s", got)
+	}
+}

@@ -21,6 +21,12 @@ type Command struct {
 	Summary string
 	// Description is optional longer help text shown by --help.
 	Description string
+	// Args names the positional arguments in usage lines, such as "<name>".
+	Args string
+	// Flags, when set, defines the command's own flags on fs. It is called
+	// on every parse, so it binds fresh variables or resets their defaults.
+	// Only leaf commands (with Run and no Subcommands) may declare flags.
+	Flags func(fs *flag.FlagSet)
 	// Run executes the command with its positional arguments.
 	Run func(env *Env, args []string) error
 	// Subcommands are the child commands, in display order.

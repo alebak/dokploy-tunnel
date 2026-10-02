@@ -36,6 +36,10 @@ type Command struct {
 	Summary string
 	// Description is optional longer help text.
 	Description string
+	// Args names the positional arguments, such as "<name>"; it may be empty.
+	Args string
+	// Flags are the command's own flags, in addition to the global ones.
+	Flags []Flag
 }
 
 // Flag is one command-line flag.
@@ -105,8 +109,22 @@ func writeCommands(b *strings.Builder, s Spec) {
 	}
 	fmt.Fprintf(b, "\nRun `%s <command> --help` for the usage of a command.\n\n", s.Name)
 	for _, c := range s.Commands {
+		if c.Description == "" && c.Args == "" && len(c.Flags) == 0 {
+			continue
+		}
+		fmt.Fprintf(b, "### `%s`\n\n", c.Path)
+		if c.Args != "" || len(c.Flags) > 0 {
+			usage := c.Path + " [flags]"
+			if c.Args != "" {
+				usage += " " + c.Args
+			}
+			fmt.Fprintf(b, "Usage: `%s`\n\n", usage)
+		}
 		if c.Description != "" {
-			fmt.Fprintf(b, "### `%s`\n\n%s\n\n", c.Path, c.Description)
+			fmt.Fprintf(b, "%s\n\n", c.Description)
+		}
+		if len(c.Flags) > 0 {
+			writeFlagTable(b, c.Flags)
 		}
 	}
 }
