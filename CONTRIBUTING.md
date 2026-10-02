@@ -50,7 +50,7 @@ This project uses [Conventional Commits](https://www.conventionalcommits.org/):
 | `fix` | Bug fixes | patch bump |
 | `perf` | Performance improvements | patch bump |
 | `revert` | Reverting a previous commit | patch bump |
-| `docs` | Documentation only | patch bump |
+| `docs` | Documentation only | none |
 | `refactor` | Code restructuring without behavior change | patch bump |
 | `test` | Adding or updating tests | none |
 | `build` | Build system or dependencies | none |

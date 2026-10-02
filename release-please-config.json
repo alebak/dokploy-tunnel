@@ -10,7 +10,7 @@
     { "type": "fix", "section": "Bug Fixes" },
     { "type": "perf", "section": "Performance Improvements" },
     { "type": "revert", "section": "Reverts" },
-    { "type": "docs", "section": "Documentation" },
+    { "type": "docs", "section": "Documentation", "hidden": true },
     { "type": "refactor", "section": "Code Refactoring" },
     { "type": "chore", "section": "Chores", "hidden": true },
     { "type": "test", "section": "Tests", "hidden": true },
