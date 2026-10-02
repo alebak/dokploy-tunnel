@@ -1,0 +1,115 @@
+version: 2
+
+project_name: dokploy-tunnel
+
+before:
+  hooks:
+    - go mod tidy
+
+builds:
+  - id: doktunnel
+    main: ./cmd/doktunnel
+    binary: doktunnel
+    env:
+      - CGO_ENABLED=0
+    flags:
+      - -trimpath
+    goos:
+      - linux
+      - darwin
+      - windows
+    goarch:
+      - amd64
+      - arm64
+    ldflags:
+      - -s -w
+      - -X github.com/alebak/dokploy-tunnel/internal/version.Version={{ .Version }}
+      - -X github.com/alebak/dokploy-tunnel/internal/version.Commit={{ .ShortCommit }}
+      - -X github.com/alebak/dokploy-tunnel/internal/version.Date={{ .Date }}
+
+  - id: doktunnel-companion
+    main: ./cmd/doktunnel-companion
+    binary: doktunnel-companion
+    env:
+      - CGO_ENABLED=0
+    flags:
+      - -trimpath
+    goos:
+      - linux
+    goarch:
+      - amd64
+      - arm64
+    ldflags:
+      - -s -w
+      - -X github.com/alebak/dokploy-tunnel/internal/version.Version={{ .Version }}
+      - -X github.com/alebak/dokploy-tunnel/internal/version.Commit={{ .ShortCommit }}
+      - -X github.com/alebak/dokploy-tunnel/internal/version.Date={{ .Date }}
+
+# Archive names are a public contract: scripts/install.sh and scripts/install.ps1
+# depend on "doktunnel_<version>_<os>_<arch>.<ext>".
+archives:
+  - id: doktunnel
+    ids:
+      - doktunnel
+    formats:
+      - tar.gz
+    format_overrides:
+      - goos: windows
+        formats:
+          - zip
+    name_template: "doktunnel_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+
+  - id: doktunnel-companion
+    ids:
+      - doktunnel-companion
+    formats:
+      - tar.gz
+    name_template: "doktunnel-companion_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+
+checksum:
+  name_template: "checksums.txt"
+  algorithm: sha256
+
+# release-please owns the changelog and the GitHub release; GoReleaser only
+# uploads artifacts and appends the download/install notes below.
+changelog:
+  disable: true
+
+release:
+  mode: append
+  header: |
+    ## Downloads
+
+    ### `doktunnel` (CLI)
+
+    | OS | amd64 | arm64 |
+    |----|-------|-------|
+    | Linux | `doktunnel_{{ .Version }}_linux_amd64.tar.gz` | `doktunnel_{{ .Version }}_linux_arm64.tar.gz` |
+    | macOS | `doktunnel_{{ .Version }}_darwin_amd64.tar.gz` | `doktunnel_{{ .Version }}_darwin_arm64.tar.gz` |
+    | Windows | `doktunnel_{{ .Version }}_windows_amd64.zip` | `doktunnel_{{ .Version }}_windows_arm64.zip` |
+
+    ### `doktunnel-companion` (server-side, Linux only)
+
+    | OS | amd64 | arm64 |
+    |----|-------|-------|
+    | Linux | `doktunnel-companion_{{ .Version }}_linux_amd64.tar.gz` | `doktunnel-companion_{{ .Version }}_linux_arm64.tar.gz` |
+
+    SHA-256 checksums for every archive are published in `checksums.txt`.
+  footer: |
+    ## Install
+
+    Linux / macOS:
+
+    ```sh
+    curl -fsSL https://raw.githubusercontent.com/alebak/dokploy-tunnel/main/scripts/install.sh | DOKTUNNEL_VERSION={{ .Version }} bash
+    ```
+
+    Windows (PowerShell):
+
+    ```powershell
+    $env:DOKTUNNEL_VERSION = "{{ .Version }}"; irm https://raw.githubusercontent.com/alebak/dokploy-tunnel/main/scripts/install.ps1 | iex
+    ```
+
+    Omit `DOKTUNNEL_VERSION` to install the latest release.
+
+    _dokploy-tunnel is a community project and is not affiliated with Dokploy._

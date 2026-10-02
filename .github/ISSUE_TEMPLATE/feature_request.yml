@@ -1,0 +1,63 @@
+name: Feature Request
+description: Propose a new feature or enhancement for dokploy-tunnel
+labels: ["enhancement"]
+
+body:
+  - type: dropdown
+    id: area
+    attributes:
+      label: Affected Area
+      description: Which part of dokploy-tunnel does this affect?
+      options:
+        - CLI (commands, flags, output)
+        - Authentication and contexts
+        - Dokploy API integration
+        - Companion service
+        - Local addressing (IPs, hostnames, hosts file)
+        - Platform support (Windows, macOS)
+        - Release and installation
+        - Testing
+        - Documentation
+        - Other
+    validations:
+      required: true
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem Statement
+      description: What problem does this solve, and for whom?
+    validations:
+      required: true
+
+  - type: textarea
+    id: solution
+    attributes:
+      label: Proposed Solution
+      description: Describe the expected behavior as specifically as possible (commands, flags, outputs).
+    validations:
+      required: true
+
+  - type: textarea
+    id: acceptance
+    attributes:
+      label: Acceptance Criteria
+      description: Observable outcomes that prove this is done.
+    validations:
+      required: true
+
+  - type: input
+    id: depends
+    attributes:
+      label: Depends On
+      description: Issues that must land first (e.g. #3, #5).
+    validations:
+      required: false
+
+  - type: textarea
+    id: context
+    attributes:
+      label: Additional Context
+      description: Links, references, alternatives considered.
+    validations:
+      required: false

@@ -1,0 +1,5 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Problems with Dokploy itself
+    url: https://github.com/Dokploy/dokploy/issues
+    about: dokploy-tunnel is a community project, not affiliated with Dokploy. Report Dokploy bugs upstream.

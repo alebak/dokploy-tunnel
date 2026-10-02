@@ -1,0 +1,28 @@
+# Binaries
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+/doktunnel
+/doktunnel-companion
+
+# Test binaries and coverage
+*.test
+*.out
+coverage.*
+*.coverprofile
+profile.cov
+
+# GoReleaser output
+dist/
+
+# Go workspace files
+go.work
+go.work.sum
+
+# Environment files
+.env
+
+# Local tooling indexes
+.codegraph/
