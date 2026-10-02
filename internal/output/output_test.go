@@ -38,6 +38,9 @@ func TestWriteError_JSONGoesToStdout(t *testing.T) {
 			if err := json.Unmarshal(stdout.Bytes(), &got); err != nil {
 				t.Fatalf("stdout is not JSON: %v (%q)", err, stdout.String())
 			}
+			if hint, _ := tt.want["hint"].(string); !strings.Contains(stdout.String(), hint) {
+				t.Errorf("stdout %q does not contain the hint verbatim", stdout.String())
+			}
 			if len(got) != len(tt.want) {
 				t.Errorf("fields = %v, want %v", got, tt.want)
 			}

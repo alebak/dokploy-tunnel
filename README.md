@@ -9,7 +9,7 @@
 
 ## Status
 
-**Early development.** The release pipeline is in place, but the binaries do not implement tunneling yet; they only report their version (`--version`). Expect breaking changes before 1.0.0.
+**Early development.** The release pipeline is in place, but the binaries do not implement tunneling yet; `doktunnel` has its command tree and error model in place, and its commands report `not_implemented`. Expect breaking changes before 1.0.0.
 
 ## Install
 
@@ -43,6 +43,46 @@ Download the archive for your platform from [Releases](https://github.com/alebak
 ### Companion
 
 `doktunnel-companion` archives are attached to each release for Linux amd64 and arm64. A supported installation method (a container image) will be documented once the companion is functional.
+
+## Usage
+
+`doktunnel --help` lists the command groups: `context`, `services`, `forward`, `status`, and `hosts`. They are not implemented yet and exit with the `not_implemented` error. `doktunnel --version` prints the build version.
+
+### Global flags
+
+Every command accepts:
+
+| Flag | Purpose |
+|------|---------|
+| `--json` | Print machine-readable JSON on stdout, including errors. |
+| `--no-input` | Never prompt for missing values; fail with `missing_input` naming the flag to pass. Implied when stdin is not a terminal. |
+| `--context <name>` | Use the named context instead of the current one. |
+
+### Errors and exit codes
+
+Every error has a stable code with its own exit code, so scripts and agents can branch on either. Codes never change meaning; new codes may be added.
+
+| Exit code | Error code | Meaning |
+|-----------|------------|---------|
+| 0 | — | Success |
+| 1 | `internal` | Unexpected failure |
+| 2 | `invalid_argument` | Unknown or malformed command, flag, or argument |
+| 3 | `missing_input` | A required value is missing and prompting is not allowed |
+| 4 | `not_implemented` | The command exists but is not implemented yet |
+| 5 | `permission_denied` | The caller lacks permission for the operation |
+| 6 | `network_not_attachable` | The target network cannot be attached |
+| 7 | `elevation_required` | The operation needs administrator privileges |
+| 8 | `unreachable` | A remote endpoint could not be reached |
+
+Without `--json`, errors are printed to stderr as `doktunnel: <message> [<code>]`, followed by a `hint:` line when there is one.
+
+With `--json`, the error is a single JSON object on **stdout** and nothing is written to stderr, so a caller parses one stream and uses the exit code to tell a result from an error:
+
+```json
+{"code":"missing_input","message":"missing value for --context","hint":"pass --context <value>"}
+```
+
+`hint` is omitted when empty.
 
 ## Releases and versioning
 
