@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -225,6 +226,27 @@ func TestContextAdd_WarnsOnPlainHTTP(t *testing.T) {
 	}
 	if got := decodeJSON[contextJSON](t, r.stdout); len(got.Warnings) != 1 {
 		t.Errorf("warnings = %q, want one plain-HTTP warning", got.Warnings)
+	}
+}
+
+func TestAPIError_Codes(t *testing.T) {
+	tests := []struct {
+		name string
+		err  error
+		want clierr.Code
+	}{
+		{"rejected key", dokploy.ErrUnauthorized, clierr.PermissionDenied},
+		{"unreachable panel", dokploy.ErrUnreachable, clierr.Unreachable},
+		{"not a Dokploy panel", dokploy.ErrUnexpectedResponse, clierr.Unreachable},
+		{"missing resource", fmt.Errorf("%w (postgres.one)", dokploy.ErrNotFound), clierr.NotFound},
+		{"other failure", errors.New("boom"), clierr.Internal},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := clierr.From(apiError("https://p", tt.err)).Code; got != tt.want {
+				t.Errorf("code = %q, want %q", got, tt.want)
+			}
+		})
 	}
 }
 

@@ -23,7 +23,7 @@ func TestExitCode_DistinctPerCode(t *testing.T) {
 func TestCodes_IncludesRequiredCodes(t *testing.T) {
 	required := []Code{
 		NotImplemented, InvalidArgument, MissingInput, PermissionDenied,
-		NetworkNotAttachable, ElevationRequired, Unreachable, Internal,
+		NetworkNotAttachable, ElevationRequired, Unreachable, NotFound, Internal,
 	}
 	known := map[Code]bool{}
 	for _, c := range Codes() {
@@ -33,6 +33,24 @@ func TestCodes_IncludesRequiredCodes(t *testing.T) {
 		if !known[c] {
 			t.Errorf("Codes() is missing %q", c)
 		}
+	}
+}
+
+// TestExitCode_Stable pins every exit code: scripts depend on them, so they
+// must never change.
+func TestExitCode_Stable(t *testing.T) {
+	want := map[Code]int{
+		Internal: 1, InvalidArgument: 2, MissingInput: 3, NotImplemented: 4,
+		PermissionDenied: 5, NetworkNotAttachable: 6, ElevationRequired: 7,
+		Unreachable: 8, NotFound: 9,
+	}
+	for code, exit := range want {
+		if got := code.ExitCode(); got != exit {
+			t.Errorf("%q.ExitCode() = %d, want %d", code, got, exit)
+		}
+	}
+	if len(Codes()) != len(want) {
+		t.Errorf("Codes() has %d codes, want %d; pin the new code here", len(Codes()), len(want))
 	}
 }
 

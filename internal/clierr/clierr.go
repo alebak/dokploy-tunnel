@@ -31,6 +31,9 @@ const (
 	ElevationRequired Code = "elevation_required"
 	// Unreachable means a remote endpoint could not be reached.
 	Unreachable Code = "unreachable"
+	// NotFound means a named resource, such as a project or service, does not
+	// exist or is not visible to the caller.
+	NotFound Code = "not_found"
 )
 
 // exitCodes maps each code to its process exit code. 0 means success and is
@@ -44,6 +47,7 @@ var exitCodes = map[Code]int{
 	NetworkNotAttachable: 6,
 	ElevationRequired:    7,
 	Unreachable:          8,
+	NotFound:             9,
 }
 
 // Codes returns every stable error code ordered by exit code.
@@ -51,6 +55,7 @@ func Codes() []Code {
 	return []Code{
 		Internal, InvalidArgument, MissingInput, NotImplemented,
 		PermissionDenied, NetworkNotAttachable, ElevationRequired, Unreachable,
+		NotFound,
 	}
 }
 

@@ -94,6 +94,7 @@ Every command accepts these flags, before or after its arguments:
 | 6 | `network_not_attachable` | The target network cannot be attached |
 | 7 | `elevation_required` | The operation needs administrator privileges |
 | 8 | `unreachable` | A remote endpoint could not be reached |
+| 9 | `not_found` | A named resource, such as a project or service, does not exist or is not visible |
 
 ## Safe agent workflows
 
