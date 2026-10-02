@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
+	"reflect"
 	"strings"
 	"testing"
 )
@@ -182,5 +184,17 @@ func TestParseBaseURL(t *testing.T) {
 				t.Errorf("URL = %q, want %q", u, tt.want)
 			}
 		})
+	}
+}
+
+// The proxy function caches the environment on first use, so the test checks
+// that the client uses it rather than setting HTTPS_PROXY.
+func TestNew_HonorsProxyEnvironment(t *testing.T) {
+	transport, ok := New(&url.URL{Scheme: "https", Host: "panel.example.com"}, testKey).http.Transport.(*http.Transport)
+	if !ok {
+		t.Fatal("client transport is not an *http.Transport")
+	}
+	if transport.Proxy == nil || reflect.ValueOf(transport.Proxy).Pointer() != reflect.ValueOf(http.ProxyFromEnvironment).Pointer() {
+		t.Error("client does not use http.ProxyFromEnvironment")
 	}
 }

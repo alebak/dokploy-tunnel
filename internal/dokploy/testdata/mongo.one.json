@@ -1,0 +1,47 @@
+{
+  "mongoId": "mongo_sessions",
+  "name": "sessions",
+  "appName": "shop-sessions-444444",
+  "description": null,
+  "databaseName": "app",
+  "databaseUser": "app",
+  "databasePassword": "do-not-log",
+  "dockerImage": "mongo:latest",
+  "command": null,
+  "env": null,
+  "memoryReservation": null,
+  "externalPort": null,
+  "applicationStatus": "running",
+  "healthCheckSwarm": null,
+  "networkSwarm": [
+    {
+      "Target": "custom-overlay",
+      "Aliases": [
+        "sessions"
+      ]
+    }
+  ],
+  "replicas": 1,
+  "createdAt": "2026-08-02T12:00:00.000Z",
+  "environmentId": "env_shop_prod",
+  "serverId": null,
+  "networkIds": [
+    "net_ignored"
+  ],
+  "detachDokployNetwork": false,
+  "environment": {
+    "environmentId": "env_shop_prod",
+    "name": "production",
+    "isDefault": true,
+    "projectId": "prj_shop",
+    "project": {
+      "projectId": "prj_shop",
+      "name": "shop",
+      "organizationId": "org1",
+      "env": ""
+    }
+  },
+  "mounts": [],
+  "server": null,
+  "backups": []
+}
