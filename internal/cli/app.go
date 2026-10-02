@@ -50,9 +50,9 @@ func (a *App) dispatch(cmd *Command, path, args []string, g *Globals) error {
 	fs.SetOutput(io.Discard)
 	var local Globals
 	BindGlobalFlags(fs, &local)
-	var showVersion bool
+	var root rootFlags
 	if cmd == a.Root {
-		fs.BoolVar(&showVersion, "version", false, "print the version and exit")
+		bindRootFlags(fs, &root)
 	}
 
 	var rest []string
@@ -72,7 +72,11 @@ func (a *App) dispatch(cmd *Command, path, args []string, g *Globals) error {
 		return clierr.New(clierr.InvalidArgument, err.Error()).
 			WithHint(fmt.Sprintf("run '%s --help' for usage", strings.Join(path, " ")))
 	}
-	if showVersion {
+	if root.skill {
+		// The skill is always Markdown, so --json does not apply to it.
+		return writeSkill(a.Stdout, a.Root)
+	}
+	if root.version {
 		_, err := fmt.Fprintln(a.Stdout, version.String(a.Root.Name))
 		return err
 	}

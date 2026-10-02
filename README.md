@@ -84,6 +84,21 @@ With `--json`, the error is a single JSON object on **stdout** and nothing is wr
 
 `hint` is omitted when empty.
 
+### Agent skill
+
+`doktunnel --skill` prints a `SKILL.md` that teaches AI agents how to use the CLI: commands, global flags, output conventions, error codes, and safe workflows. It is generated from the installed binary, so it always matches it; it needs no context or network, and ignores `--json`.
+
+Install it into your agent's skills directory, and regenerate it after upgrading doktunnel:
+
+```bash
+# Claude Code
+mkdir -p ~/.claude/skills/doktunnel
+doktunnel --skill > ~/.claude/skills/doktunnel/SKILL.md
+
+# Any agent that reads SKILL.md files
+doktunnel --skill > <agent skills dir>/doktunnel/SKILL.md
+```
+
 ## Releases and versioning
 
 - Versions follow [Semantic Versioning](https://semver.org) and are derived from [Conventional Commits](https://www.conventionalcommits.org) by [release-please](https://github.com/googleapis/release-please).
