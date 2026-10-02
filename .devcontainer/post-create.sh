@@ -12,13 +12,13 @@ if command -v goreleaser >/dev/null 2>&1; then
   echo "GoReleaser already installed"
 else
   echo "Installing GoReleaser..."
-  go install github.com/goreleaser/goreleaser/v2@latest
+  GOTOOLCHAIN=auto go install github.com/goreleaser/goreleaser/v2@latest
 fi
 
 # actionlint, for validating GitHub Actions workflows.
 if ! command -v actionlint >/dev/null 2>&1; then
   echo "Installing actionlint..."
-  go install github.com/rhysd/actionlint/cmd/actionlint@latest
+  GOTOOLCHAIN=auto go install github.com/rhysd/actionlint/cmd/actionlint@latest
 fi
 
 go mod download
