@@ -106,6 +106,13 @@ func New(base *url.URL, apiKey string) *Client {
 	}
 }
 
+// WithAPIKey returns a client for the same panel that authenticates with
+// apiKey instead. It shares c's connections, so a server acting for many
+// callers keeps one connection pool to the panel.
+func (c *Client) WithAPIKey(apiKey string) *Client {
+	return &Client{base: c.base, apiKey: apiKey, http: c.http}
+}
+
 // Organization implements API. It reads the organization bound to the key
 // from user.session, then its name from organization.one.
 func (c *Client) Organization(ctx context.Context) (Organization, error) {

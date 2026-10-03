@@ -198,3 +198,19 @@ func TestNew_HonorsProxyEnvironment(t *testing.T) {
 		t.Error("client does not use http.ProxyFromEnvironment")
 	}
 }
+
+func TestClient_WithAPIKey_UsesTheNewKey(t *testing.T) {
+	srv := fakePanel(t, "")
+	stale := newClient(t, srv.URL, "dok_revoked_key")
+	fresh := stale.WithAPIKey(testKey)
+
+	if _, err := fresh.Organization(context.Background()); err != nil {
+		t.Fatalf("Organization with the new key: %v", err)
+	}
+	if _, err := stale.Organization(context.Background()); !errors.Is(err, ErrUnauthorized) {
+		t.Fatalf("Organization with the original key = %v, want ErrUnauthorized", err)
+	}
+	if fresh.http != stale.http {
+		t.Error("WithAPIKey did not share the HTTP client")
+	}
+}
