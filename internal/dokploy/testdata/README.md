@@ -42,3 +42,21 @@ The fixed database ports the client reports (postgres 5432, mysql and
 mariadb 3306, mongo 27017, redis 6379, libsql 8080 HTTP, 5001 gRPC and 5000
 admin) are the `TargetPort` values in
 `packages/server/src/utils/databases/<type>.ts`.
+
+## Compose services
+
+`compose.loadServices` takes `composeId` and `type` as query parameters
+(`apiFetchServices` in `packages/server/src/db/schema/compose.ts`: `type` is
+`"fetch"` or `"cache"`, defaulting to `"cache"`). doktunnel always sends
+`type=cache`, which reads the compose file already on the server; `fetch`
+would `git clone` the compose source first. The router
+(`apps/dokploy/server/api/routers/compose.ts`, `loadServices`) checks
+`service: read` and the member's access to that compose service
+(`checkServicePermissionAndAccess`), and `loadServices` in
+`packages/server/src/services/compose.ts` returns the keys of the file's
+`services` map, or throws `NOT_FOUND` ("Services not found") when no file is
+cached.
+
+| Fixture | Procedure | Mirrors |
+| --- | --- | --- |
+| `compose.loadServices.json` | `compose.loadServices?composeId=cmp_stack&type=cache` | the service names of the `composeFile` in `compose.one.json` |
