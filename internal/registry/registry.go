@@ -14,6 +14,8 @@ import (
 	"net/netip"
 	"slices"
 	"time"
+
+	"github.com/alebak/dokploy-tunnel/internal/hostname"
 )
 
 // DefaultRange is the loopback range leases are allocated from.
@@ -33,6 +35,9 @@ type Lease struct {
 	Key       Key
 	IP        netip.Addr
 	CreatedAt time.Time
+	// Names are the display names last recorded with SetNames; they are
+	// zero until the lease is named.
+	Names hostname.Names
 }
 
 // ExhaustedError is returned when every address in the range is leased or
@@ -169,6 +174,27 @@ func (r *Registry) Forget(k Key) (bool, error) {
 	return removed, err
 }
 
+// SetNames records the display names the hostname of k's lease is built
+// from and reports whether they changed. Names follow renames in Dokploy;
+// the address never does. It returns ErrNotLeased when k has no lease.
+func (r *Registry) SetNames(k Key, n hostname.Names) (bool, error) {
+	k, err := k.normalize()
+	if err != nil {
+		return false, err
+	}
+	var changed bool
+	err = r.update(func(st *state) (bool, error) {
+		i := st.find(k)
+		if i < 0 {
+			return false, fmt.Errorf("%w: %+v", ErrNotLeased, k)
+		}
+		changed = st.Leases[i].Names != n
+		st.Leases[i].Names = n
+		return changed, nil
+	})
+	return changed, err
+}
+
 // update runs fn on the current state while holding the file lock and saves
 // the state when fn reports a change.
 func (r *Registry) update(fn func(*state) (bool, error)) (err error) {
@@ -193,5 +219,9 @@ func (r *Registry) update(fn func(*state) (bool, error)) (err error) {
 	return save(r.path, st)
 }
 
-// ErrInvalidKey is wrapped by every Key validation error.
-var ErrInvalidKey = errors.New("invalid service key")
+var (
+	// ErrInvalidKey is wrapped by every Key validation error.
+	ErrInvalidKey = errors.New("invalid service key")
+	// ErrNotLeased means the key has no lease.
+	ErrNotLeased = errors.New("service has no address lease")
+)

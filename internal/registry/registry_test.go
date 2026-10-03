@@ -11,6 +11,8 @@ import (
 	"strings"
 	"sync"
 	"testing"
+
+	"github.com/alebak/dokploy-tunnel/internal/hostname"
 )
 
 func newTestRegistry(t *testing.T, opts ...Option) (*Registry, string) {
@@ -235,6 +237,50 @@ func TestList_ReturnsLeasesInAddressOrder(t *testing.T) {
 	}
 	if leases[0].Key.Instance != "https://dokploy.example.com" || leases[0].CreatedAt.IsZero() {
 		t.Fatalf("lease metadata not persisted: %+v", leases[0])
+	}
+}
+
+func TestSetNames_PersistsAndReportsChanges(t *testing.T) {
+	r, path := newTestRegistry(t)
+	k := testKey("pg")
+	ip := mustLease(t, r, k)
+	names := hostname.Names{Context: "prod", Organization: "Acme", Project: "shop", Compose: "myapp", Service: "postgres"}
+
+	changed, err := r.SetNames(k, names)
+	if err != nil || !changed {
+		t.Fatalf("SetNames = %v, %v; want true, nil", changed, err)
+	}
+	if changed, err := r.SetNames(k, names); err != nil || changed {
+		t.Fatalf("SetNames with the same names = %v, %v; want false, nil", changed, err)
+	}
+
+	reopened, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	leases, err := reopened.List()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(leases) != 1 || leases[0].Names != names || leases[0].IP != ip {
+		t.Fatalf("List = %+v, want one lease at %v with names %+v", leases, ip, names)
+	}
+
+	renamed := names
+	renamed.Service = "primary"
+	if changed, err := reopened.SetNames(k, renamed); err != nil || !changed {
+		t.Fatalf("SetNames after a rename = %v, %v; want true, nil", changed, err)
+	}
+	if got, _, _ := reopened.Lookup(k); got != ip {
+		t.Fatalf("rename moved the lease from %v to %v", ip, got)
+	}
+}
+
+func TestSetNames_WithoutLease(t *testing.T) {
+	r, _ := newTestRegistry(t)
+	_, err := r.SetNames(testKey("none"), hostname.Names{Service: "x"})
+	if !errors.Is(err, ErrNotLeased) {
+		t.Fatalf("SetNames error = %v, want ErrNotLeased", err)
 	}
 }
 
