@@ -6,9 +6,12 @@ shop (prj_shop)
     postgres     main-db        done     5432  pg_main
     redis        cache          error    6379  redis_cache
   staging
-    TYPE     NAME       STATUS  PORT  ID
-    mariadb  legacy-db  idle    3306  maria_stg
-    libsql   -          -       8080  libsql_edge
+    TYPE               NAME            STATUS  PORT  ID
+    mariadb            legacy-db       idle    3306  maria_stg
+    compose            myapp           done    -     cmp_myapp
+      compose_service  myapp/postgres  -       -     cmp_myapp/postgres
+      compose_service  myapp/pgadmin   -       -     cmp_myapp/pgadmin
+    libsql             -               -       8080  libsql_edge
   preview
     no services
 

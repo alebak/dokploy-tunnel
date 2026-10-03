@@ -53,6 +53,7 @@ type API interface {
 	Organization(ctx context.Context) (Organization, error)
 	Catalog
 	Detailer
+	ComposeLister
 }
 
 var _ API = (*Client)(nil)
