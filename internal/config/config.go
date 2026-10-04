@@ -13,6 +13,8 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+
+	"github.com/alebak/dokploy-tunnel/internal/fsutil"
 )
 
 // SchemaVersion is the config file format version. Bump it on incompatible
@@ -143,29 +145,11 @@ func (c *Config) Save(path string) error {
 	}
 	b = append(b, '\n')
 
-	dir, base := filepath.Split(path)
-	if err := os.MkdirAll(dir, 0o700); err != nil {
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return fmt.Errorf("creating config directory: %w", err)
 	}
-	// CreateTemp creates the file with mode 0600.
-	tmp, err := os.CreateTemp(dir, "."+base+".tmp*")
-	if err != nil {
+	if err := fsutil.WriteFileAtomic(path, b, 0o600); err != nil {
 		return fmt.Errorf("writing config: %w", err)
-	}
-	defer os.Remove(tmp.Name()) // no-op after a successful rename
-	if _, err := tmp.Write(b); err != nil {
-		tmp.Close()
-		return fmt.Errorf("writing config: %w", err)
-	}
-	if err := tmp.Sync(); err != nil {
-		tmp.Close()
-		return fmt.Errorf("writing config: %w", err)
-	}
-	if err := tmp.Close(); err != nil {
-		return fmt.Errorf("writing config: %w", err)
-	}
-	if err := os.Rename(tmp.Name(), path); err != nil {
-		return fmt.Errorf("replacing config: %w", err)
 	}
 	return nil
 }

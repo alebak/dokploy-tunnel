@@ -7,8 +7,9 @@ import (
 	"io/fs"
 	"net/netip"
 	"os"
-	"path/filepath"
 	"time"
+
+	"github.com/alebak/dokploy-tunnel/internal/fsutil"
 )
 
 // schemaVersion is the lease file format version. Bump it on incompatible
@@ -136,25 +137,9 @@ func save(path string, st *state) error {
 	}
 	b = append(b, '\n')
 
-	dir, base := filepath.Split(path)
-	tmp, err := os.CreateTemp(dir, "."+base+".tmp*")
-	if err != nil {
+	// The directory is created by the lock taken before every save.
+	if err := fsutil.WriteFileAtomic(path, b, 0o600); err != nil {
 		return fmt.Errorf("writing address registry: %w", err)
-	}
-	defer os.Remove(tmp.Name()) // no-op after a successful rename
-	if _, err := tmp.Write(b); err != nil {
-		tmp.Close()
-		return fmt.Errorf("writing address registry: %w", err)
-	}
-	if err := tmp.Sync(); err != nil {
-		tmp.Close()
-		return fmt.Errorf("writing address registry: %w", err)
-	}
-	if err := tmp.Close(); err != nil {
-		return fmt.Errorf("writing address registry: %w", err)
-	}
-	if err := os.Rename(tmp.Name(), path); err != nil {
-		return fmt.Errorf("replacing address registry: %w", err)
 	}
 	return nil
 }
