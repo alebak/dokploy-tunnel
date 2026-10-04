@@ -1,7 +1,8 @@
 name: platform
 
 # Verifies platform behavior that unit tests can only fake: binding leased
-# loopback addresses and, on macOS, lo0 aliases. These checks run sudo and
+# loopback addresses and, on macOS, lo0 aliases, and the hosts file round
+# trip with real privileges and the system resolver. These checks run sudo and
 # change the runner, so they live in the internal/platformtest package
 # behind the "platform" build tag and only run when DOKTUNNEL_PLATFORM_TESTS
 # is set on GitHub Actions. Never run them on a developer machine.
@@ -44,3 +45,27 @@ jobs:
 
       - name: Loopback binding probe
         run: go test -tags platform -count=1 -v -run TestLoopback ./internal/platformtest/
+
+      # The hosts round trip relies on how the runner is elevated, so record
+      # it: GitHub's Windows runners are expected to run as an elevated
+      # Administrator, in which case "hosts sync" needs no UAC prompt.
+      - name: Report Windows elevation context
+        if: ${{ !cancelled() && runner.os == 'Windows' }}
+        shell: pwsh
+        run: |
+          $principal = [Security.Principal.WindowsPrincipal]::new([Security.Principal.WindowsIdentity]::GetCurrent())
+          $elevated = $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+          $policy = Get-ItemProperty -Path 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System'
+          $lines = @(
+            "- windows: elevated token: $elevated",
+            "- windows: EnableLUA (UAC): $($policy.EnableLUA)",
+            "- windows: ConsentPromptBehaviorAdmin: $($policy.ConsentPromptBehaviorAdmin)"
+          )
+          $lines | ForEach-Object { Write-Host $_ }
+          $lines | Add-Content -LiteralPath $env:GITHUB_STEP_SUMMARY
+
+      # Runs sudo (Linux, macOS) and rewrites the runner's hosts file; on
+      # Windows it also runs the helper through a real UAC elevation.
+      - name: Hosts file round trip with privileges
+        if: ${{ !cancelled() }}
+        run: go test -tags platform -count=1 -v -run TestHosts ./internal/platformtest/
