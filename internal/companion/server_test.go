@@ -91,9 +91,15 @@ type testCompanion struct {
 
 func newTestCompanion(t *testing.T) *testCompanion {
 	t.Helper()
+	return newLimitedCompanion(t, Limits{})
+}
+
+// newLimitedCompanion is a testCompanion with the given tunnel limits.
+func newLimitedCompanion(t *testing.T, limits Limits) *testCompanion {
+	t.Helper()
 	tc := &testCompanion{fake: newFakeDokploy(t), bridge: newPipeBridge(), logs: &syncBuffer{}}
 	log := slog.New(slog.NewTextHandler(tc.logs, &slog.HandlerOptions{Level: slog.LevelDebug}))
-	tc.server = NewServer(NewAuthorizer(tc.fake.start(), ""), tc.bridge, log)
+	tc.server = NewServer(NewAuthorizer(tc.fake.start(), ""), tc.bridge, log, limits)
 	tc.http = httptest.NewServer(tc.server)
 	t.Cleanup(func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -395,6 +401,50 @@ func TestServer_Tunnel_FailuresAfterAuthorization(t *testing.T) {
 			resp := request(t, http.MethodGet, tc.url("http", pgQuery), ownerKey, upgradeHeaders())
 			assertRejected(t, resp, tt.status, tt.code)
 		})
+	}
+}
+
+func TestServer_Tunnel_CapsConcurrentTunnels(t *testing.T) {
+	const appQuery = "serviceType=application&serviceId=app_web&port=3000"
+	tc := newLimitedCompanion(t, Limits{PerKey: 2, Total: 3})
+	open := func(key, query string) *websocket.Conn {
+		t.Helper()
+		c := tc.dial(t, key, query)
+		tc.bridge.target(t)
+		<-tc.bridge.targets
+		return c
+	}
+	first := open(ownerKey, pgQuery)
+	open(ownerKey, pgQuery)
+
+	// A third tunnel for the same key is refused before the bridge.
+	assertRejected(t, request(t, http.MethodGet, tc.url("http", pgQuery), ownerKey, upgradeHeaders()),
+		http.StatusTooManyRequests, codeTooManyTunnels)
+	// Another key still has room, until the global cap.
+	open(memberKey, appQuery)
+	assertRejected(t, request(t, http.MethodGet, tc.url("http", appQuery), memberKey, upgradeHeaders()),
+		http.StatusTooManyRequests, codeTooManyTunnels)
+	if tc.bridge.opened() {
+		t.Fatal("the bridge was opened over the cap")
+	}
+
+	// Closing a tunnel frees its slot.
+	first.Close(websocket.StatusNormalClosure, "")
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		c, resp, err := websocket.Dial(ctx, tc.url("ws", pgQuery), &websocket.DialOptions{
+			HTTPHeader: http.Header{tunnel.HeaderAPIKey: {ownerKey}},
+		})
+		cancel()
+		if err == nil {
+			c.CloseNow()
+			break
+		}
+		if resp == nil || resp.StatusCode != http.StatusTooManyRequests || time.Now().After(deadline) {
+			t.Fatalf("dial after closing a tunnel: %v", err)
+		}
+		time.Sleep(10 * time.Millisecond)
 	}
 }
 

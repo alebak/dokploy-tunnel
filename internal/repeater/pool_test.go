@@ -2,9 +2,14 @@ package repeater
 
 import (
 	"context"
+	"errors"
 	"log/slog"
+	"net/http"
+	"net/netip"
 	"slices"
+	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -14,9 +19,16 @@ import (
 
 const testImage = "alpine/socat:test"
 
-func endpointOn(n docker.Network, host string) Endpoint {
-	return Endpoint{Host: host, Network: n}
+// endpointOn is a target at addr on n.
+func endpointOn(n docker.Network, addr string) Endpoint {
+	return Endpoint{Addr: netip.MustParseAddr(addr), Name: "target-" + addr, Network: n}
 }
+
+// Addresses of targets on composeDefault and dokployNetwork.
+const (
+	pgAddr  = "172.20.0.5"
+	webAddr = "10.0.1.7"
+)
 
 func newRepeater(t *testing.T, fake *dockertest.Fake, opts Options) *Repeater {
 	t.Helper()
@@ -48,7 +60,7 @@ func TestAcquire_CreatesAHardenedLabeledRepeater(t *testing.T) {
 	fake.AddImage(testImage)
 	r := newRepeater(t, fake, Options{Owner: "companion-a"})
 
-	id, release, err := r.acquire(testContext(t), endpointOn(composeDefault, "postgres"))
+	id, release, err := r.acquire(testContext(t), endpointOn(composeDefault, pgAddr))
 	if err != nil {
 		t.Fatalf("acquire: %v", err)
 	}
@@ -69,14 +81,18 @@ func TestAcquire_CreatesAHardenedLabeledRepeater(t *testing.T) {
 	if cfg.HostConfig.NetworkMode != composeDefault.ID {
 		t.Errorf("NetworkMode = %q, want only the target's network %q", cfg.HostConfig.NetworkMode, composeDefault.ID)
 	}
-	if cfg.User == "" || cfg.User == "0" || !cfg.HostConfig.ReadonlyRootfs || !slices.Equal(cfg.HostConfig.CapDrop, []string{"ALL"}) ||
-		!slices.Contains(cfg.HostConfig.SecurityOpt, "no-new-privileges") {
+	hc := cfg.HostConfig
+	if cfg.User == "" || cfg.User == "0" || !hc.ReadonlyRootfs || !slices.Equal(hc.CapDrop, []string{"ALL"}) ||
+		!slices.Contains(hc.SecurityOpt, "no-new-privileges") {
 		t.Errorf("repeater is not hardened: %+v", cfg)
+	}
+	if hc.Init == nil || !*hc.Init || hc.PidsLimit == nil || *hc.PidsLimit != repeaterPidsLimit || hc.Memory != repeaterMemoryBytes {
+		t.Errorf("repeater resources are not limited: init %v, pids %v, memory %d", hc.Init, hc.PidsLimit, hc.Memory)
 	}
 	for k, want := range map[string]string{
 		LabelRepeater: "1",
 		LabelOwner:    "companion-a",
-		LabelTarget:   "postgres",
+		LabelTarget:   "target-" + pgAddr,
 		LabelNetwork:  "myapp_default",
 	} {
 		if got := cfg.Labels[k]; got != want {
@@ -92,7 +108,7 @@ func TestAcquire_SharesOneRepeaterPerTarget(t *testing.T) {
 	fake := newFake(t)
 	fake.AddImage(testImage)
 	r := newRepeater(t, fake, Options{Grace: time.Hour})
-	ep := endpointOn(composeDefault, "postgres")
+	ep := endpointOn(composeDefault, pgAddr)
 
 	const n = 8
 	ids := make([]string, n)
@@ -113,7 +129,7 @@ func TestAcquire_SharesOneRepeaterPerTarget(t *testing.T) {
 		t.Fatalf("concurrent acquires created %d repeaters with IDs %q, want one shared", len(fake.Created()), ids)
 	}
 
-	other, releaseOther, err := r.acquire(testContext(t), endpointOn(dokployNetwork, "myapp-web"))
+	other, releaseOther, err := r.acquire(testContext(t), endpointOn(dokployNetwork, webAddr))
 	if err != nil {
 		t.Fatalf("acquire other target: %v", err)
 	}
@@ -130,7 +146,7 @@ func TestRelease_RemovesAfterGrace(t *testing.T) {
 	fake := newFake(t)
 	fake.AddImage(testImage)
 	r := newRepeater(t, fake, Options{Grace: 50 * time.Millisecond})
-	ep := endpointOn(composeDefault, "postgres")
+	ep := endpointOn(composeDefault, pgAddr)
 
 	id, release1, err := r.acquire(testContext(t), ep)
 	if err != nil {
@@ -157,7 +173,7 @@ func TestAcquire_DuringGraceReusesTheRepeater(t *testing.T) {
 	fake := newFake(t)
 	fake.AddImage(testImage)
 	r := newRepeater(t, fake, Options{Grace: time.Hour})
-	ep := endpointOn(composeDefault, "postgres")
+	ep := endpointOn(composeDefault, pgAddr)
 
 	id1, release, err := r.acquire(testContext(t), ep)
 	if err != nil {
@@ -177,7 +193,7 @@ func TestAcquire_DuringGraceReusesTheRepeater(t *testing.T) {
 func TestAcquire_PullsAMissingImage(t *testing.T) {
 	fake := newFake(t)
 	r := newRepeater(t, fake, Options{})
-	_, release, err := r.acquire(testContext(t), endpointOn(composeDefault, "postgres"))
+	_, release, err := r.acquire(testContext(t), endpointOn(composeDefault, pgAddr))
 	if err != nil {
 		t.Fatalf("acquire: %v", err)
 	}
@@ -191,7 +207,7 @@ func TestAcquire_FailuresAreNotCached(t *testing.T) {
 	fake := newFake(t)
 	fake.PullError = "registry unreachable"
 	r := newRepeater(t, fake, Options{})
-	ep := endpointOn(composeDefault, "postgres")
+	ep := endpointOn(composeDefault, pgAddr)
 	if _, _, err := r.acquire(testContext(t), ep); err == nil {
 		t.Fatal("acquire without an image succeeded")
 	}
@@ -208,7 +224,7 @@ func TestAcquire_CreateFailureLeavesNothing(t *testing.T) {
 	fake.AddImage(testImage)
 	fake.CreateError = &docker.APIError{StatusCode: 500, Message: "no space left"}
 	r := newRepeater(t, fake, Options{})
-	if _, _, err := r.acquire(testContext(t), endpointOn(composeDefault, "postgres")); err == nil {
+	if _, _, err := r.acquire(testContext(t), endpointOn(composeDefault, pgAddr)); err == nil {
 		t.Fatal("acquire succeeded although the daemon fails creations")
 	}
 	if ids := fake.ContainerIDs(); len(ids) != 0 {
@@ -220,10 +236,10 @@ func TestClose_RemovesEveryRepeater(t *testing.T) {
 	fake := newFake(t)
 	fake.AddImage(testImage)
 	r := New(newClient(t, fake), Options{Image: testImage, Grace: time.Hour, Log: slog.New(slog.DiscardHandler)})
-	if _, _, err := r.acquire(testContext(t), endpointOn(composeDefault, "postgres")); err != nil {
+	if _, _, err := r.acquire(testContext(t), endpointOn(composeDefault, pgAddr)); err != nil {
 		t.Fatal(err)
 	}
-	if _, _, err := r.acquire(testContext(t), endpointOn(dokployNetwork, "myapp-web")); err != nil {
+	if _, _, err := r.acquire(testContext(t), endpointOn(dokployNetwork, webAddr)); err != nil {
 		t.Fatal(err)
 	}
 	if err := r.Close(testContext(t)); err != nil {
@@ -232,23 +248,38 @@ func TestClose_RemovesEveryRepeater(t *testing.T) {
 	if ids := fake.ContainerIDs(); len(ids) != 0 {
 		t.Errorf("containers left after Close: %q", ids)
 	}
-	if _, _, err := r.acquire(testContext(t), endpointOn(composeDefault, "postgres")); err == nil {
+	if _, _, err := r.acquire(testContext(t), endpointOn(composeDefault, pgAddr)); err == nil {
 		t.Error("acquire after Close succeeded")
 	}
+}
+
+// orphan is a repeater container no live companion tracks.
+func orphan(id string, created time.Time) dockertest.Container {
+	return dockertest.Container{ID: id, Name: repeaterNamePrefix + id, Image: testImage, Running: true, Created: created,
+		Labels: map[string]string{LabelRepeater: "1", LabelOwner: "dead-companion"}}
 }
 
 func TestReap(t *testing.T) {
 	fake := newFake(t)
 	fake.AddImage(testImage)
 	old := time.Now().Add(-time.Hour)
-	repeaterLabels := map[string]string{LabelRepeater: "1", LabelOwner: "dead-companion"}
-	fake.AddContainer(dockertest.Container{ID: "orphan-running", Name: "o1", Running: true, Created: old, Labels: repeaterLabels})
-	fake.AddContainer(dockertest.Container{ID: "orphan-exited", Name: "o2", Running: false, Created: old, Labels: repeaterLabels})
-	fake.AddContainer(dockertest.Container{ID: "recent-orphan", Name: "y", Running: true, Created: time.Now(), Labels: repeaterLabels})
+	fake.AddContainer(orphan("orphan-running", old))
+	exited := orphan("orphan-exited", old)
+	exited.Running = false
+	fake.AddContainer(exited)
+	fake.AddContainer(orphan("recent-orphan", time.Now()))
 	fake.AddContainer(dockertest.Container{ID: "unrelated", Name: "u", Running: true, Created: old, Labels: map[string]string{"app": "x"}})
+	// Containers anyone could label as repeaters are kept unless they
+	// also have a repeater's name and image.
+	wrongName := orphan("wrong-name", old)
+	wrongName.Name = "tenant-db"
+	fake.AddContainer(wrongName)
+	wrongImage := orphan("wrong-image", old)
+	wrongImage.Image = "postgres:16"
+	fake.AddContainer(wrongImage)
 
 	r := newRepeater(t, fake, Options{TTL: time.Minute, Grace: time.Hour})
-	tracked, release, err := r.acquire(testContext(t), endpointOn(composeDefault, "postgres"))
+	tracked, release, err := r.acquire(testContext(t), endpointOn(composeDefault, pgAddr))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -256,7 +287,7 @@ func TestReap(t *testing.T) {
 	// Two hours later, even the recent orphan is past the TTL; the tracked
 	// repeater is kept however old it is.
 	r.now = func() time.Time { return time.Now().Add(2 * time.Hour) }
-	fake.AddContainer(dockertest.Container{ID: "young-later", Name: "y2", Running: true, Created: time.Now().Add(2 * time.Hour), Labels: repeaterLabels})
+	fake.AddContainer(orphan("young-later", time.Now().Add(2*time.Hour)))
 
 	removed, err := r.Reap(testContext(t))
 	if err != nil {
@@ -266,17 +297,67 @@ func TestReap(t *testing.T) {
 	if want := []string{"orphan-exited", "orphan-running", "recent-orphan"}; !slices.Equal(removed, want) {
 		t.Errorf("reaped %q, want %q", removed, want)
 	}
-	for _, id := range []string{tracked, "unrelated", "young-later"} {
+	for _, id := range []string{tracked, "unrelated", "young-later", "wrong-name", "wrong-image"} {
 		if _, ok := fake.Container(id); !ok {
 			t.Errorf("container %s was reaped", id)
 		}
 	}
+	if n := fake.VolumeRemovals(); n != 0 {
+		t.Errorf("%d removals also removed volumes", n)
+	}
+}
+
+func TestRun_AHungReapPassTimesOut(t *testing.T) {
+	fake := newFake(t)
+	var lists atomic.Int32
+	fake.Intercept = func(w http.ResponseWriter, r *http.Request) bool {
+		if strings.HasSuffix(r.URL.Path, "/containers/json") {
+			lists.Add(1)
+			<-r.Context().Done() // a daemon that never answers
+			return true
+		}
+		return false
+	}
+	r := newRepeater(t, fake, Options{ReapInterval: 10 * time.Millisecond})
+	r.reapTimeout = 20 * time.Millisecond
+	ctx, cancel := context.WithCancel(testContext(t))
+	done := make(chan struct{})
+	go func() {
+		r.Run(ctx)
+		close(done)
+	}()
+	eventually(t, "a second reap pass", func() bool { return lists.Load() >= 2 })
+	cancel()
+	<-done
+}
+
+func TestAcquire_CapsRepeaters(t *testing.T) {
+	fake := newFake(t)
+	fake.AddImage(testImage)
+	r := newRepeater(t, fake, Options{MaxRepeaters: 1, Grace: time.Hour})
+	first, release, err := r.acquire(testContext(t), endpointOn(composeDefault, pgAddr))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := r.acquire(testContext(t), endpointOn(dokployNetwork, webAddr)); !errors.Is(err, ErrTooManyRepeaters) {
+		t.Fatalf("acquire over the cap: error = %v, want %v", err, ErrTooManyRepeaters)
+	}
+	// An idle repeater makes room.
+	release()
+	_, release, err = r.acquire(testContext(t), endpointOn(dokployNetwork, webAddr))
+	if err != nil {
+		t.Fatalf("acquire with an idle repeater to evict: %v", err)
+	}
+	defer release()
+	eventually(t, "the idle repeater to be evicted", func() bool {
+		_, ok := fake.Container(first)
+		return !ok
+	})
 }
 
 func TestRun_ReapsAtStartup(t *testing.T) {
 	fake := newFake(t)
-	fake.AddContainer(dockertest.Container{ID: "orphan", Name: "o", Running: true, Created: time.Now().Add(-time.Hour),
-		Labels: map[string]string{LabelRepeater: "1"}})
+	fake.AddContainer(orphan("orphan", time.Now().Add(-time.Hour)))
 	r := newRepeater(t, fake, Options{TTL: time.Minute, ReapInterval: time.Hour})
 	ctx, cancel := context.WithCancel(testContext(t))
 	done := make(chan struct{})

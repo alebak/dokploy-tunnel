@@ -259,6 +259,9 @@ It is configured with flags or environment variables; flags win:
 | `--repeater-image` | `DOKTUNNEL_COMPANION_REPEATER_IMAGE` | `alpine/socat:1.8.1.1@sha256:7f9a…` | Repeater image; it must provide `socat` and `sleep` |
 | `--repeater-grace` | `DOKTUNNEL_COMPANION_REPEATER_GRACE` | `30s` | How long a repeater outlives its last tunnel |
 | `--reaper-ttl` | `DOKTUNNEL_COMPANION_REAPER_TTL` | `1m` | Age after which an orphaned repeater is removed |
+| `--max-tunnels` | `DOKTUNNEL_COMPANION_MAX_TUNNELS` | `512` | Tunnels open at once; more are refused with `too_many_tunnels` |
+| `--max-tunnels-per-key` | `DOKTUNNEL_COMPANION_MAX_TUNNELS_PER_KEY` | `64` | Tunnels one API key may have open at once |
+| `--max-repeaters` | `DOKTUNNEL_COMPANION_MAX_REPEATERS` | `128` | Repeater containers running at once; idle ones are removed early to make room |
 | `--version` | | | Print the version and exit |
 
 `GET /healthz` answers `200` with `{"status":"ok"}` while the companion accepts tunnels. On `SIGINT` or `SIGTERM` it stops accepting tunnels, closes open ones with the WebSocket "going away" code, and exits within 30 seconds. Logs are written to stderr; they never contain API keys.
@@ -269,12 +272,13 @@ The companion serves plain HTTP. Put it behind a TLS-terminating proxy, such as 
 
 Docker networks are segmented, so the companion never joins tenant networks itself. With the `docker` bridge it talks to the Docker Engine API (the companion exits at startup if Docker does not answer) and, for each target, runs one idle **repeater** container from a small socat image:
 
-- The target's container is found by the labels Dokploy itself uses: `com.docker.swarm.service.name=<appName>` for applications and databases, `com.docker.compose.project` and `com.docker.compose.service` for services of a `docker-compose` stack, and `com.docker.stack.namespace` for `stack` deployments.
-- The repeater joins exactly one of the target's own networks, preferring the stack's own network over custom networks over `dokploy-network`. It listens on no port, runs as `nobody` with no capabilities and a read-only root filesystem, and is labeled `dev.doktunnel.repeater=1`. A target reachable only on overlay networks that are not attachable is refused with `network_not_attachable`.
-- Every tunnel runs `socat STDIO TCP:<service>:<port>` in the repeater through `docker exec`, addressing the target by its Swarm service, Compose service or container name.
-- Concurrent tunnels to one target share its repeater, which is removed when the last tunnel has been closed for the grace period. Repeaters left behind by a stopped companion are removed at startup and every minute once older than the reaper TTL. One companion per Docker daemon is assumed.
+- The target is found from sources tied to the service Dokploy authorized, never from names or labels another tenant could copy. Applications, databases and services of `stack` deployments are Swarm services: the companion inspects the service by its exact name (`<appName>`, or `<appName>_<service>` with `com.docker.stack.namespace=<appName>` on the service) and takes a running task's container, networks and addresses from the Swarm API. Services of `docker-compose` stacks are found by their `com.docker.compose.project` and `com.docker.compose.service` labels, which Compose sets itself, and only accepted when their project directory is Dokploy's for that appName (`/etc/dokploy/compose/<appName>`). Containers carrying any `com.docker.swarm.*` label are refused there, and containers that match but disagree on their project or networks make the tunnel fail rather than guess.
+- Some targets are refused with `target_unreachable`: appNames `dokploy` and `dokploy-*`, which Dokploy's own services use while users may pick such names too, and containers that run privileged, on the host network, or with the Docker socket mounted.
+- The repeater joins exactly one of the target's own networks, preferring the stack's own network over custom networks over `dokploy-network`. It listens on no port, runs as `nobody` with no capabilities, a read-only root filesystem, an init, and limits of 256 processes and 64 MiB of memory, and is labeled `dev.doktunnel.repeater=1`. A target reachable only on overlay networks that are not attachable is refused with `network_not_attachable`.
+- Every tunnel runs `socat STDIO TCP:<ip>:<port>` in the repeater through `docker exec`, dialing the address Docker reports for the target on that network, so no DNS name is involved.
+- Concurrent tunnels to one target share its repeater, which is removed when the last tunnel has been closed for the grace period. Repeaters left behind by a stopped companion are removed at startup and every minute once older than the reaper TTL; only containers with the repeater label, a `doktunnel-repeater-` name and the configured repeater image are removed, without their volumes. One companion per Docker daemon is assumed.
 
-The companion therefore needs the Docker socket, which is root-equivalent on the host. Running it behind a least-privilege socket proxy is tracked in [#9](https://github.com/alebak/dokploy-tunnel/issues/9).
+The companion therefore needs the Docker socket, which is root-equivalent on the host. Running it behind a least-privilege socket proxy is tracked in [#9](https://github.com/alebak/dokploy-tunnel/issues/9). The companion warns at startup when `--docker-host` is a `tcp://` address outside the loopback interface: keep such an endpoint on a network only the companion joins.
 
 ### Security and permissions
 

@@ -2,17 +2,21 @@
 
 // Integration tests against a real Docker daemon. They create and remove
 // containers, so they only run in the integration workflow
-// (.github/workflows/integration.yml), which prepares the targets below,
-// and only when DOKTUNNEL_INTEGRATION=1 as a second guard.
+// (.github/workflows/integration.yml), which prepares the Swarm targets
+// below, and only when DOKTUNNEL_INTEGRATION=1 as a second guard.
 
 package repeater
 
 import (
 	"bufio"
+	"context"
 	"errors"
 	"io"
 	"log/slog"
+	"maps"
 	"os"
+	"os/exec"
+	"path/filepath"
 	"slices"
 	"strings"
 	"sync"
@@ -24,9 +28,6 @@ import (
 
 // Targets the workflow deploys.
 const (
-	// itProject is a docker compose project whose service echo answers
-	// on port 7000 (testdata/compose.integration.yml).
-	itProject = "doktunnel-it"
 	// itSwarmService is a Swarm service on an attachable overlay that
 	// answers on port 7000.
 	itSwarmService = "doktunnel-it-web"
@@ -48,6 +49,42 @@ func integrationClient(t *testing.T) *docker.Client {
 		t.Fatalf("Docker is not reachable: %v", err)
 	}
 	return c
+}
+
+// composeProject deploys testdata/compose.integration.yml, whose service
+// echo answers on port 7000, the way Dokploy does: as project appName from
+// <dir>/<appName>/code. It returns the appName and dir, to use as
+// Options.ComposeDir, and removes the project when the test ends.
+func composeProject(t *testing.T) (appName, dir string) {
+	t.Helper()
+	appName = "doktunnel-it-" + randomHex(4)
+	dir = t.TempDir()
+	code := filepath.Join(dir, appName, "code")
+	src, err := os.ReadFile(filepath.Join("testdata", "compose.integration.yml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(code, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	file := filepath.Join(code, "docker-compose.yml")
+	if err := os.WriteFile(file, src, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	compose := func(args ...string) error {
+		cmd := exec.Command("docker", append([]string{"compose", "-p", appName, "-f", file}, args...)...)
+		cmd.Stdout, cmd.Stderr = os.Stderr, os.Stderr
+		return cmd.Run()
+	}
+	t.Cleanup(func() {
+		if err := compose("down", "--timeout", "1"); err != nil {
+			t.Errorf("removing compose project %s: %v", appName, err)
+		}
+	})
+	if err := compose("up", "-d", "--wait"); err != nil {
+		t.Fatalf("deploying compose project %s: %v", appName, err)
+	}
+	return appName, dir
 }
 
 func integrationRepeater(t *testing.T, c *docker.Client, opts Options) *Repeater {
@@ -86,8 +123,9 @@ func echo(t *testing.T, s io.ReadWriter, line string) {
 
 func TestIntegration_ComposeService(t *testing.T) {
 	c := integrationClient(t)
-	r := integrationRepeater(t, c, Options{Grace: time.Second})
-	target := Target{Kind: KindCompose, AppName: itProject, Service: "echo", Port: itPort}
+	project, dir := composeProject(t)
+	r := integrationRepeater(t, c, Options{Grace: time.Second, ComposeDir: dir})
+	target := Target{Kind: KindCompose, AppName: project, Service: "echo", Port: itPort}
 
 	ports, err := r.ExposedPorts(testContext(t), target)
 	if err != nil || !slices.Contains(ports, Port{itPort, "tcp"}) {
@@ -126,11 +164,14 @@ func TestIntegration_ComposeService(t *testing.T) {
 	if n := len(ctr.NetworkSettings.Networks); n != 1 {
 		t.Errorf("repeater joined %d networks (%v), want only the target's", n, ctr.NetworkSettings.Networks)
 	}
-	if _, ok := ctr.NetworkSettings.Networks[itProject+"_default"]; !ok {
-		t.Errorf("repeater networks = %v, want %s_default", ctr.NetworkSettings.Networks, itProject)
+	if _, ok := ctr.NetworkSettings.Networks[project+"_default"]; !ok {
+		t.Errorf("repeater networks = %v, want %s_default", ctr.NetworkSettings.Networks, project)
 	}
-	if got := ctr.Config.Labels[LabelTarget]; got != "echo" {
-		t.Errorf("repeater target label = %q, want the Compose service name", got)
+	if got := ctr.Config.Labels[LabelTarget]; got != project+"/echo" {
+		t.Errorf("repeater target label = %q, want %s/echo", got, project)
+	}
+	if ctr.HostConfig.Privileged {
+		t.Error("repeater runs privileged")
 	}
 
 	// Half-close reaches the target, which still answers.
@@ -155,6 +196,77 @@ func TestIntegration_ComposeService(t *testing.T) {
 	}
 }
 
+// TestIntegration_ComposeIgnoresDecoys runs containers that copy the
+// target's Compose labels, named to sort first and on the same network,
+// and answering differently: tunnels must still reach the real service.
+func TestIntegration_ComposeIgnoresDecoys(t *testing.T) {
+	c := integrationClient(t)
+	project, dir := composeProject(t)
+	r := integrationRepeater(t, c, Options{Grace: time.Second, ComposeDir: dir})
+	target := Target{Kind: KindCompose, AppName: project, Service: "echo", Port: itPort}
+
+	real, err := c.ListContainers(testContext(t), docker.ListOptions{Labels: []string{
+		labelComposeProject + "=" + project, labelComposeService + "=echo"}})
+	if err != nil || len(real) != 1 {
+		t.Fatalf("listing the real container: %v, %v", real, err)
+	}
+	victim, err := c.InspectContainer(testContext(t), real[0].ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	decoy := func(name string, labels map[string]string) {
+		t.Helper()
+		cfg := docker.ContainerConfig{
+			Image:  victim.Config.Image,
+			Cmd:    []string{"TCP-LISTEN:7000,fork,reuseaddr", "SYSTEM:echo decoy"},
+			Labels: labels,
+			HostConfig: docker.HostConfig{
+				NetworkMode: project + "_default",
+			},
+		}
+		id, err := c.CreateContainer(testContext(t), name, cfg)
+		if err != nil {
+			t.Fatalf("creating decoy %s: %v", name, err)
+		}
+		t.Cleanup(func() {
+			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+			defer cancel()
+			if err := c.RemoveContainer(ctx, id); err != nil {
+				t.Errorf("removing decoy %s: %v", name, err)
+			}
+		})
+		if err := c.StartContainer(testContext(t), id); err != nil {
+			t.Fatalf("starting decoy %s: %v", name, err)
+		}
+	}
+	// What a stack file can do: any label, next to Swarm's own.
+	stackLike := maps.Clone(victim.Config.Labels)
+	stackLike["com.docker.swarm.service.name"] = "evil_echo"
+	decoy("aaa-"+project+"-swarm-decoy", stackLike)
+	// A container started from another directory.
+	elsewhere := maps.Clone(victim.Config.Labels)
+	elsewhere[labelComposeWorkingDir] = "/srv/elsewhere"
+	elsewhere[labelComposeConfigFiles] = "/srv/elsewhere/docker-compose.yml"
+	decoy("aaa-"+project+"-dir-decoy", elsewhere)
+
+	ep, err := r.Resolve(testContext(t), target)
+	if err != nil {
+		t.Fatalf("Resolve: %v", err)
+	}
+	if ep.ContainerID != victim.ID {
+		t.Fatalf("resolved container %s, want the real one %s", ep.ContainerID, victim.ID)
+	}
+	for i := range 3 {
+		s, err := r.Open(testContext(t), target)
+		if err != nil {
+			t.Fatalf("Open: %v", err)
+		}
+		echo(t, s, strings.Repeat("real", i+1))
+		s.Close()
+	}
+}
+
 func TestIntegration_SwarmService(t *testing.T) {
 	c := integrationClient(t)
 	r := integrationRepeater(t, c, Options{})
@@ -168,13 +280,20 @@ func TestIntegration_SwarmService(t *testing.T) {
 
 func TestIntegration_Failures(t *testing.T) {
 	c := integrationClient(t)
-	r := integrationRepeater(t, c, Options{Grace: time.Second})
+	project, dir := composeProject(t)
+	r := integrationRepeater(t, c, Options{Grace: time.Second, ComposeDir: dir})
 
 	_, err := r.Open(testContext(t), Target{Kind: KindSwarmService, AppName: itClosedService, Port: itPort})
 	if !errors.Is(err, ErrNetworkNotAttachable) {
 		t.Errorf("non-attachable overlay: error = %v, want %v", err, ErrNetworkNotAttachable)
 	}
-	_, err = r.Open(testContext(t), Target{Kind: KindCompose, AppName: itProject, Service: "echo", Port: itPort + 1})
+	// Outside Dokploy's directory for the appName, nothing is found.
+	other := integrationRepeater(t, c, Options{Grace: time.Second})
+	_, err = other.Open(testContext(t), Target{Kind: KindCompose, AppName: project, Service: "echo", Port: itPort})
+	if !errors.Is(err, ErrTargetUnreachable) {
+		t.Errorf("compose project outside the compose directory: error = %v, want %v", err, ErrTargetUnreachable)
+	}
+	_, err = r.Open(testContext(t), Target{Kind: KindCompose, AppName: project, Service: "echo", Port: itPort + 1})
 	if !errors.Is(err, ErrTargetUnreachable) || !strings.Contains(err.Error(), "socat") {
 		t.Errorf("closed port: error = %v, want %v from socat", err, ErrTargetUnreachable)
 	}
@@ -182,10 +301,11 @@ func TestIntegration_Failures(t *testing.T) {
 
 func TestIntegration_ReaperRemovesAbandonedRepeaters(t *testing.T) {
 	c := integrationClient(t)
+	project, dir := composeProject(t)
 	// A companion that dies with a tunnel open: its Repeater is never
 	// closed.
-	crashed := New(c, Options{Grace: time.Hour, Log: slog.New(slog.DiscardHandler)})
-	s, err := crashed.Open(testContext(t), Target{Kind: KindCompose, AppName: itProject, Service: "echo", Port: itPort})
+	crashed := New(c, Options{Grace: time.Hour, ComposeDir: dir, Log: slog.New(slog.DiscardHandler)})
+	s, err := crashed.Open(testContext(t), Target{Kind: KindCompose, AppName: project, Service: "echo", Port: itPort})
 	if err != nil {
 		t.Fatalf("Open: %v", err)
 	}
