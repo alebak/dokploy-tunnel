@@ -114,3 +114,39 @@ func TestExec_Errors(t *testing.T) {
 		t.Errorf("exec in a stopped container: error = %v, want conflict", err)
 	}
 }
+
+func TestExec_ReadStreamTellsStderrApart(t *testing.T) {
+	fake := dockertest.New(t)
+	fake.AddContainer(dockertest.Container{ID: "rep1", Name: "repeater", Running: true})
+	fake.ExecHandler = func(_ string, _ []string, _ io.Reader, stdout, stderr io.Writer) int {
+		io.WriteString(stdout, "greeting")
+		io.WriteString(stderr, "notice")
+		return 0
+	}
+	c := newClient(t, fake)
+	ex, err := c.Exec(testContext(t), "rep1", []string{"x"}, nil)
+	if err != nil {
+		t.Fatalf("Exec: %v", err)
+	}
+	defer ex.Close()
+
+	var stdout, stderr string
+	buf := make([]byte, 64)
+	for {
+		n, isStderr, err := ex.ReadStream(buf)
+		if isStderr {
+			stderr += string(buf[:n])
+		} else {
+			stdout += string(buf[:n])
+		}
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			t.Fatalf("ReadStream: %v", err)
+		}
+	}
+	if stdout != "greeting" || stderr != "notice" {
+		t.Errorf("stdout %q, stderr %q", stdout, stderr)
+	}
+}

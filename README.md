@@ -245,7 +245,7 @@ doktunnel --skill > <agent skills dir>/doktunnel/SKILL.md
 
 `doktunnel-companion` is the server-side half of dokploy-tunnel. A Dokploy administrator installs one on each Dokploy server whose services should be reachable: on the Dokploy server itself, and on each remote server Dokploy deploys to. `doktunnel` opens one WebSocket to it for every local TCP connection; the [wire protocol](docs/protocol.md) is documented separately.
 
-> **Work in progress.** The companion authorizes tunnels, but forwarding to services is not implemented yet: authorized requests are refused with `target_unreachable`. A supported installation method will be documented once it is functional.
+> **Work in progress.** The companion forwards through Docker, but a supported installation method will be documented once the whole path is verified end to end.
 
 It is configured with flags or environment variables; flags win:
 
@@ -254,11 +254,27 @@ It is configured with flags or environment variables; flags win:
 | `--dokploy-url` | `DOKTUNNEL_COMPANION_DOKPLOY_URL` | required | URL of the Dokploy panel, as reachable from the companion, such as `http://dokploy:3000` |
 | `--server-id` | `DOKTUNNEL_COMPANION_SERVER_ID` | empty | ID of the Dokploy server the companion runs on; empty or `local` for the Dokploy server itself |
 | `--listen` | `DOKTUNNEL_COMPANION_LISTEN` | `:8080` | TCP address to serve on |
+| `--bridge` | `DOKTUNNEL_COMPANION_BRIDGE` | `docker` | `docker` forwards through repeater containers; `none` refuses every authorized tunnel with `target_unreachable` |
+| `--docker-host` | `DOCKER_HOST` | `unix:///var/run/docker.sock` | Docker daemon: `unix:///path` or plain `tcp://host:port`, such as a socket proxy |
+| `--repeater-image` | `DOKTUNNEL_COMPANION_REPEATER_IMAGE` | `alpine/socat:1.8.1.1@sha256:7f9a…` | Repeater image; it must provide `socat` and `sleep` |
+| `--repeater-grace` | `DOKTUNNEL_COMPANION_REPEATER_GRACE` | `30s` | How long a repeater outlives its last tunnel |
+| `--reaper-ttl` | `DOKTUNNEL_COMPANION_REAPER_TTL` | `1m` | Age after which an orphaned repeater is removed |
 | `--version` | | | Print the version and exit |
 
 `GET /healthz` answers `200` with `{"status":"ok"}` while the companion accepts tunnels. On `SIGINT` or `SIGTERM` it stops accepting tunnels, closes open ones with the WebSocket "going away" code, and exits within 30 seconds. Logs are written to stderr; they never contain API keys.
 
 The companion serves plain HTTP. Put it behind a TLS-terminating proxy, such as the Traefik instance Dokploy already runs, because every tunnel request carries the caller's API key.
+
+### How it reaches services
+
+Docker networks are segmented, so the companion never joins tenant networks itself. With the `docker` bridge it talks to the Docker Engine API (the companion exits at startup if Docker does not answer) and, for each target, runs one idle **repeater** container from a small socat image:
+
+- The target's container is found by the labels Dokploy itself uses: `com.docker.swarm.service.name=<appName>` for applications and databases, `com.docker.compose.project` and `com.docker.compose.service` for services of a `docker-compose` stack, and `com.docker.stack.namespace` for `stack` deployments.
+- The repeater joins exactly one of the target's own networks, preferring the stack's own network over custom networks over `dokploy-network`. It listens on no port, runs as `nobody` with no capabilities and a read-only root filesystem, and is labeled `dev.doktunnel.repeater=1`. A target reachable only on overlay networks that are not attachable is refused with `network_not_attachable`.
+- Every tunnel runs `socat STDIO TCP:<service>:<port>` in the repeater through `docker exec`, addressing the target by its Swarm service, Compose service or container name.
+- Concurrent tunnels to one target share its repeater, which is removed when the last tunnel has been closed for the grace period. Repeaters left behind by a stopped companion are removed at startup and every minute once older than the reaper TTL. One companion per Docker daemon is assumed.
+
+The companion therefore needs the Docker socket, which is root-equivalent on the host. Running it behind a least-privilege socket proxy is tracked in [#9](https://github.com/alebak/dokploy-tunnel/issues/9).
 
 ### Security and permissions
 
