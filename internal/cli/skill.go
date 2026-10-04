@@ -40,6 +40,9 @@ func SkillSpec(root *Command) skill.Spec {
 // skillCommands appends cmds and their descendants to dst, depth first.
 func skillCommands(dst []skill.Command, path []string, cmds []*Command) []skill.Command {
 	for _, c := range cmds {
+		if c.Hidden {
+			continue
+		}
 		p := append(path[:len(path):len(path)], c.Name)
 		var flags []skill.Flag
 		if c.Flags != nil {
