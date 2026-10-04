@@ -20,11 +20,7 @@ func NewRoot() *Command {
 				Summary: "Show active forwards",
 				Run:     notImplemented("status"),
 			},
-			{
-				Name:    "hosts",
-				Summary: "Manage local hostname entries for forwarded services",
-				Run:     notImplemented("hosts"),
-			},
+			newHostsCommand(),
 		},
 	}
 }

@@ -9,7 +9,7 @@
 
 ## Status
 
-**Early development.** The release pipeline is in place, but the binaries do not implement tunneling yet. `doktunnel` can register Dokploy panels as [contexts](#contexts) and [list their services](#services); its other commands report `not_implemented`. `doktunnel-companion` serves the tunnel endpoint and authorizes requests, but cannot reach services yet (see [Companion](#companion-server)). Expect breaking changes before 1.0.0.
+**Early development.** The release pipeline is in place, but the binaries do not implement tunneling yet. `doktunnel` can register Dokploy panels as [contexts](#contexts), [list their services](#services) and manage the [hosts file section](#hostnames); its other commands report `not_implemented`. `doktunnel-companion` serves the tunnel endpoint and authorizes requests, but cannot reach services yet (see [Companion](#companion-server)). Expect breaking changes before 1.0.0.
 
 ## Install
 
@@ -46,7 +46,7 @@ Download the archive for your platform from [Releases](https://github.com/alebak
 
 ## Usage
 
-`doktunnel --help` lists the command groups: `context`, `services`, `forward`, `status`, and `hosts`. Only `context` and `services` are implemented so far; the others exit with the `not_implemented` error. `doktunnel <command> --help` shows a command's flags, and `doktunnel --version` prints the build version.
+`doktunnel --help` lists the command groups: `context`, `services`, `forward`, `status`, and `hosts`. Only `context`, `services` and `hosts` are implemented so far; the others exit with the `not_implemented` error. `doktunnel <command> --help` shows a command's flags, and `doktunnel --version` prints the build version.
 
 ### Contexts
 
@@ -134,6 +134,58 @@ With `--json`, the result is a stable tree:
 | `services[].warning` | What is unknown and why: `name` and `status` that could not be read, or, on a compose stack, internal services that could not be read; present only then |
 
 Lists are always present, possibly empty. New fields may be added; existing fields keep their meaning.
+
+### Hostnames
+
+Every forwarded service gets its own loopback address from `127.77.0.0/16` and a stable hostname under `.internal`, a top-level domain reserved for private use:
+
+| Target | Hostname |
+|--------|----------|
+| Dokploy service | `<service>.<project>.<org>.<context>.internal`, e.g. `main-db.shop.acme.prod.internal` |
+| Service inside a compose stack | `<service>.<compose>.<project>.<org>.<context>.internal`, e.g. `postgres.myapp.shop.acme.prod.internal` |
+
+**Labels.** Each part is built from a display name: lowercased, every character other than `a`–`z` and `0`–`9` (including dots, spaces and accented letters) becomes a hyphen, repeated hyphens collapse, and leading and trailing hyphens are dropped, so `Main DB` becomes `main-db`. A part longer than 63 characters is cut and ends in a short hash of the full name; a name with no usable character becomes `x-` and a hash. Whole hostnames never exceed 253 characters.
+
+**Collisions.** Two services can end up with the same hostname, for example `Main DB` and `main_db`, or a service with the same name in two environments of one project. doktunnel never maps two services to one name: the service registered first keeps the plain hostname, and each later one gets a suffix of 6 hex characters derived from its Dokploy instance, organization and service ID, as in `main-db-1a2b3c.shop.acme.prod.internal` (longer when that is taken too). The result is deterministic, and an existing hostname never changes when a newer service with the same name appears.
+
+**The hosts file section.** doktunnel writes the hostnames to the system hosts file (`/etc/hosts` on Linux and macOS, `%SystemRoot%\System32\drivers\etc\hosts` on Windows) inside one marked block:
+
+```text
+# BEGIN doktunnel (managed block, do not edit; remove with 'doktunnel hosts clean')
+127.77.0.1	postgres.myapp.shop.acme.prod.internal
+127.77.0.2	main-db.shop.acme.prod.internal
+# END doktunnel
+```
+
+Only that block is ever parsed and rewritten: every other line stays byte for byte, the block uses the line ending the file already has (CRLF on Windows), and the file is replaced atomically where the system allows it. If the markers are malformed (a begin without an end, an end without a begin, or two blocks), doktunnel refuses to edit the file and asks you to run `doktunnel hosts clean`.
+
+```sh
+doktunnel hosts sync --dry-run   # show what would change
+doktunnel hosts sync             # write the section, only if it changed
+doktunnel hosts list             # the entries currently in the section
+doktunnel hosts clean            # remove the section, nothing else
+```
+
+`hosts sync` builds the section from the services registered in the address registry and writes it only when it differs from the file; services are registered when you forward them. `hosts clean` also repairs malformed markers: a begin and end pair is removed with everything between them, and a marker without a partner is removed alone.
+
+With `--json`, `hosts sync` prints `{"hosts_file","dry_run","changed","added","removed","aliases"}`, `hosts list` prints `{"hosts_file","entries"}` and `hosts clean` prints `{"hosts_file","changed","removed"}`, where every entry is `{"ip","hostname"}` and `aliases` lists the macOS loopback aliases added (or, with `--dry-run`, to add):
+
+```json
+{"hosts_file":"/etc/hosts","entries":[{"ip":"127.77.0.1","hostname":"postgres.myapp.shop.acme.prod.internal"}]}
+```
+
+**Administrator privileges.** The hosts file belongs to root (Administrator on Windows), but doktunnel never runs as root: your API keys live in *your* OS keyring, and your config and address registry in *your* home directory, which a root process would not see. Instead, when the section must change, doktunnel re-runs only the privileged step, the same binary with an internal helper command that reads the new entries from a file in its state directory and accepts nothing but loopback addresses and `.internal` hostnames:
+
+- **Linux and macOS:** through `sudo`, which asks for your password.
+- **macOS** also needs every address added to `lo0` (`ifconfig lo0 alias <ip> up`); the aliases are lost on reboot, so `hosts sync` checks them and re-adds missing ones in the same step.
+- **Windows:** through a UAC prompt (PowerShell `Start-Process -Verb RunAs`).
+
+When nothing changed, nothing is elevated. With `--no-input`, or when stdin is not a terminal, doktunnel never prompts: it fails with `elevation_required`, and the hint is the exact command to run yourself, for example:
+
+```text
+doktunnel: updating /etc/hosts needs administrator privileges, and prompting is not allowed [elevation_required]
+hint: run: sudo /usr/local/bin/doktunnel hosts privileged-apply --entries-file /home/me/.local/state/doktunnel/pending-hosts
+```
 
 ### Global flags
 

@@ -11,6 +11,8 @@ import (
 	"net/url"
 
 	"github.com/alebak/dokploy-tunnel/internal/dokploy"
+	"github.com/alebak/dokploy-tunnel/internal/elevate"
+	"github.com/alebak/dokploy-tunnel/internal/hosts"
 	"github.com/alebak/dokploy-tunnel/internal/keyring"
 	"github.com/alebak/dokploy-tunnel/internal/prompt"
 )
@@ -34,6 +36,10 @@ type Command struct {
 	Run func(env *Env, args []string) error
 	// Subcommands are the child commands, in display order.
 	Subcommands []*Command
+	// Hidden keeps the command out of help listings and the agent skill.
+	// It is for internal entry points, such as the privileged helper,
+	// that users never type themselves.
+	Hidden bool
 }
 
 // Find returns the direct subcommand called name, or nil.
@@ -97,4 +103,16 @@ type Env struct {
 	ReadSecret func() (string, error)
 	// Getenv reads environment variables.
 	Getenv func(key string) string
+	// HostsPath is the hosts file; empty means the system hosts file.
+	HostsPath string
+	// RegistryPath is the address registry; empty means the default.
+	RegistryPath string
+	// Elevator runs the privileged helper.
+	Elevator elevate.Elevator
+	// Loopback manages loopback aliases.
+	Loopback hosts.Loopback
+	// Executable returns the path of the running binary.
+	Executable func() (string, error)
+	// WriteHosts replaces the hosts file.
+	WriteHosts func(path string, data []byte) error
 }

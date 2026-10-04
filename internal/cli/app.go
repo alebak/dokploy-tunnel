@@ -14,6 +14,8 @@ import (
 
 	"github.com/alebak/dokploy-tunnel/internal/clierr"
 	"github.com/alebak/dokploy-tunnel/internal/dokploy"
+	"github.com/alebak/dokploy-tunnel/internal/elevate"
+	"github.com/alebak/dokploy-tunnel/internal/hosts"
 	"github.com/alebak/dokploy-tunnel/internal/keyring"
 	"github.com/alebak/dokploy-tunnel/internal/output"
 	"github.com/alebak/dokploy-tunnel/internal/prompt"
@@ -44,6 +46,20 @@ type App struct {
 	ReadSecret func() (string, error)
 	// Getenv reads environment variables; nil means os.Getenv.
 	Getenv func(key string) string
+	// HostsPath is the hosts file; empty means the system hosts file.
+	HostsPath string
+	// RegistryPath is the address registry; empty means
+	// registry.DefaultPath().
+	RegistryPath string
+	// Elevator runs the privileged helper; nil means elevate.System().
+	Elevator elevate.Elevator
+	// Loopback manages loopback aliases; nil means hosts.SystemLoopback().
+	Loopback hosts.Loopback
+	// Executable returns the path of the running binary, which the
+	// privileged helper re-executes; nil means os.Executable.
+	Executable func() (string, error)
+	// WriteHosts replaces the hosts file; nil means hosts.Write.
+	WriteHosts func(path string, data []byte) error
 }
 
 // Run executes the command selected by args (without the program name) and
@@ -130,6 +146,13 @@ func (a *App) env(g Globals) *Env {
 		NewAPI:     a.NewAPI,
 		ReadSecret: a.ReadSecret,
 		Getenv:     a.Getenv,
+
+		HostsPath:    a.HostsPath,
+		RegistryPath: a.RegistryPath,
+		Elevator:     a.Elevator,
+		Loopback:     a.Loopback,
+		Executable:   a.Executable,
+		WriteHosts:   a.WriteHosts,
 	}
 	env.NoInput = env.NoInput || !a.StdinIsTerminal
 	env.Input = prompt.New(!env.NoInput, stdin, a.Stderr)
@@ -138,6 +161,18 @@ func (a *App) env(g Globals) *Env {
 	}
 	if env.Getenv == nil {
 		env.Getenv = os.Getenv
+	}
+	if env.Elevator == nil {
+		env.Elevator = elevate.System()
+	}
+	if env.Loopback == nil {
+		env.Loopback = hosts.SystemLoopback()
+	}
+	if env.Executable == nil {
+		env.Executable = os.Executable
+	}
+	if env.WriteHosts == nil {
+		env.WriteHosts = hosts.Write
 	}
 	return env
 }
@@ -205,6 +240,9 @@ func (a *App) writeHelp(cmd *Command, path []string, fs *flag.FlagSet) error {
 	if len(cmd.Subcommands) > 0 {
 		b.WriteString("\nCommands:\n")
 		for _, sub := range cmd.Subcommands {
+			if sub.Hidden {
+				continue
+			}
 			fmt.Fprintf(tw, "  %s\t%s\n", sub.Name, sub.Summary)
 		}
 		if err := tw.Flush(); err != nil {
