@@ -1,0 +1,46 @@
+name: platform
+
+# Verifies platform behavior that unit tests can only fake: binding leased
+# loopback addresses and, on macOS, lo0 aliases. These checks run sudo and
+# change the runner, so they live in the internal/platformtest package
+# behind the "platform" build tag and only run when DOKTUNNEL_PLATFORM_TESTS
+# is set on GitHub Actions. Never run them on a developer machine.
+#
+# A disproved platform assumption is reported as a "Platform finding"
+# warning annotation and in the job summary.
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+concurrency:
+  group: platform-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  platform:
+    name: platform (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os:
+          - ubuntu-latest
+          - windows-latest
+          - macos-latest
+    runs-on: ${{ matrix.os }}
+    env:
+      DOKTUNNEL_PLATFORM_TESTS: "1"
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+
+      - name: Loopback binding probe
+        run: go test -tags platform -count=1 -v -run TestLoopback ./internal/platformtest/
