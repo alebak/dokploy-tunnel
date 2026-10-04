@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"net/url"
+	"strconv"
 	"time"
 
 	"github.com/alebak/dokploy-tunnel/internal/docker"
@@ -23,6 +24,9 @@ const (
 	EnvRepeaterImage = "DOKTUNNEL_COMPANION_REPEATER_IMAGE"
 	EnvRepeaterGrace = "DOKTUNNEL_COMPANION_REPEATER_GRACE"
 	EnvReaperTTL     = "DOKTUNNEL_COMPANION_REAPER_TTL"
+	EnvMaxTunnels    = "DOKTUNNEL_COMPANION_MAX_TUNNELS"
+	EnvMaxPerKey     = "DOKTUNNEL_COMPANION_MAX_TUNNELS_PER_KEY"
+	EnvMaxRepeaters  = "DOKTUNNEL_COMPANION_MAX_REPEATERS"
 	// EnvDockerHost is Docker's own variable, so the companion finds the
 	// daemon the way the docker CLI does.
 	EnvDockerHost = "DOCKER_HOST"
@@ -62,6 +66,12 @@ type Config struct {
 	RepeaterGrace time.Duration
 	// ReaperTTL is how old an orphaned repeater must be to be removed.
 	ReaperTTL time.Duration
+	// MaxTunnels caps the tunnels open at once.
+	MaxTunnels int
+	// MaxTunnelsPerKey caps the tunnels one API key has open at once.
+	MaxTunnelsPerKey int
+	// MaxRepeaters caps the repeater containers running at once.
+	MaxRepeaters int
 }
 
 // ParseConfig reads the configuration from the command-line arguments args
@@ -86,6 +96,12 @@ func ParseConfig(args []string, getenv func(string) string, usage io.Writer) (Co
 		"`duration` a repeater outlives its last tunnel (env "+EnvRepeaterGrace+")")
 	ttl := fs.String("reaper-ttl", orDefault(getenv(EnvReaperTTL), repeater.DefaultTTL.String()),
 		"`duration` after which an orphaned repeater is removed (env "+EnvReaperTTL+")")
+	maxTunnels := fs.String("max-tunnels", orDefault(getenv(EnvMaxTunnels), strconv.Itoa(DefaultMaxTunnels)),
+		"`number` of tunnels open at once, over which tunnels are refused with too_many_tunnels (env "+EnvMaxTunnels+")")
+	maxPerKey := fs.String("max-tunnels-per-key", orDefault(getenv(EnvMaxPerKey), strconv.Itoa(DefaultMaxTunnelsPerKey)),
+		"`number` of tunnels one API key may have open at once (env "+EnvMaxPerKey+")")
+	maxRepeaters := fs.String("max-repeaters", orDefault(getenv(EnvMaxRepeaters), strconv.Itoa(repeater.DefaultMaxRepeaters)),
+		"`number` of repeater containers running at once (env "+EnvMaxRepeaters+")")
 	version := fs.Bool("version", false, "print the version and exit")
 	if err := fs.Parse(args); err != nil {
 		return Config{}, err
@@ -130,7 +146,28 @@ func ParseConfig(args []string, getenv func(string) string, usage io.Writer) (Co
 	if cfg.ReaperTTL, err = positiveDuration("--reaper-ttl", *ttl); err != nil {
 		return Config{}, err
 	}
+	if cfg.MaxTunnels, err = positiveInt("--max-tunnels", *maxTunnels); err != nil {
+		return Config{}, err
+	}
+	if cfg.MaxTunnelsPerKey, err = positiveInt("--max-tunnels-per-key", *maxPerKey); err != nil {
+		return Config{}, err
+	}
+	if cfg.MaxRepeaters, err = positiveInt("--max-repeaters", *maxRepeaters); err != nil {
+		return Config{}, err
+	}
 	return cfg, nil
+}
+
+// positiveInt parses the value v of the flag name.
+func positiveInt(name, v string) (int, error) {
+	n, err := strconv.Atoi(v)
+	if err != nil {
+		return 0, fmt.Errorf("%s: %w", name, err)
+	}
+	if n <= 0 {
+		return 0, fmt.Errorf("%s: must be positive, not %s", name, v)
+	}
+	return n, nil
 }
 
 // positiveDuration parses the value v of the flag name.

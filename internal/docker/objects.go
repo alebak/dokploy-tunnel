@@ -38,15 +38,33 @@ type Container struct {
 		// ExposedPorts are keyed like "5432/tcp".
 		ExposedPorts map[string]struct{} `json:"ExposedPorts"`
 	} `json:"Config"`
+	HostConfig struct {
+		Privileged bool `json:"Privileged"`
+		// NetworkMode is "host" for a container on the host's network
+		// stack.
+		NetworkMode string `json:"NetworkMode"`
+		// Binds are bind mounts as "source:destination[:options]".
+		Binds []string `json:"Binds"`
+	} `json:"HostConfig"`
+	Mounts          []Mount `json:"Mounts"`
 	NetworkSettings struct {
 		// Networks are keyed by network name.
 		Networks map[string]EndpointSettings `json:"Networks"`
 	} `json:"NetworkSettings"`
 }
 
+// Mount is a volume or bind mount of a container.
+type Mount struct {
+	Type        string `json:"Type"`
+	Source      string `json:"Source"`
+	Destination string `json:"Destination"`
+}
+
 // EndpointSettings is a container's attachment to one network.
 type EndpointSettings struct {
 	NetworkID string `json:"NetworkID"`
+	// IPAddress is the container's IPv4 address on the network.
+	IPAddress string `json:"IPAddress"`
 	// Aliases are the names the container has on the network, such as its
 	// Compose service name.
 	Aliases []string `json:"Aliases"`
@@ -77,13 +95,65 @@ type Service struct {
 
 // ServiceSpec is the specification of a Swarm service.
 type ServiceSpec struct {
-	Name         string       `json:"Name"`
-	TaskTemplate TaskTemplate `json:"TaskTemplate"`
+	Name string `json:"Name"`
+	// Labels are the service's own labels; `docker stack deploy` sets
+	// com.docker.stack.namespace on them.
+	Labels       map[string]string `json:"Labels"`
+	TaskTemplate TaskTemplate      `json:"TaskTemplate"`
 }
 
 // TaskTemplate is the template of a Swarm service's tasks.
 type TaskTemplate struct {
-	Networks []NetworkAttachment `json:"Networks"`
+	ContainerSpec ContainerSpec       `json:"ContainerSpec"`
+	Networks      []NetworkAttachment `json:"Networks"`
+}
+
+// ContainerSpec is the container a Swarm service's tasks run.
+type ContainerSpec struct {
+	Mounts []ServiceMount `json:"Mounts"`
+}
+
+// ServiceMount is a mount of a Swarm service's containers.
+type ServiceMount struct {
+	Type   string `json:"Type"`
+	Source string `json:"Source"`
+	Target string `json:"Target"`
+}
+
+// Task is a Swarm task: one replica of a service, reduced to the fields
+// the companion uses.
+type Task struct {
+	ID           string `json:"ID"`
+	ServiceID    string `json:"ServiceID"`
+	NodeID       string `json:"NodeID"`
+	DesiredState string `json:"DesiredState"`
+	Status       struct {
+		// State is "running" once the task's container runs.
+		State           string `json:"State"`
+		ContainerStatus struct {
+			ContainerID string `json:"ContainerID"`
+		} `json:"ContainerStatus"`
+	} `json:"Status"`
+	// NetworksAttachments are the networks the task is on, with its
+	// addresses there.
+	NetworksAttachments []TaskNetwork `json:"NetworksAttachments"`
+}
+
+// TaskNetwork is a task's attachment to one network.
+type TaskNetwork struct {
+	Network struct {
+		ID string `json:"ID"`
+	} `json:"Network"`
+	// Addresses are in CIDR notation, such as "10.0.1.5/24".
+	Addresses []string `json:"Addresses"`
+}
+
+// TaskListOptions select Swarm tasks to list.
+type TaskListOptions struct {
+	// Service is a service ID.
+	Service string
+	// DesiredState is "running", "shutdown" or "accepted".
+	DesiredState string
 }
 
 // NetworkAttachment attaches a Swarm service to a network.
@@ -164,6 +234,31 @@ func (c *Client) InspectService(ctx context.Context, id string) (Service, error)
 	return out, err
 }
 
+// ListTasks lists the Swarm tasks matching opts. The daemon must be a
+// Swarm manager.
+func (c *Client) ListTasks(ctx context.Context, opts TaskListOptions) ([]Task, error) {
+	filters := map[string][]string{}
+	if opts.Service != "" {
+		filters["service"] = []string{opts.Service}
+	}
+	if opts.DesiredState != "" {
+		filters["desired-state"] = []string{opts.DesiredState}
+	}
+	q := url.Values{}
+	if len(filters) > 0 {
+		f, err := json.Marshal(filters)
+		if err != nil {
+			return nil, err
+		}
+		q.Set("filters", string(f))
+	}
+	var out []Task
+	if err := c.do(ctx, http.MethodGet, "/tasks", q, nil, &out); err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // CreateContainer creates a container named name and returns its ID.
 func (c *Client) CreateContainer(ctx context.Context, name string, cfg ContainerConfig) (string, error) {
 	var out struct {
@@ -184,9 +279,11 @@ func (c *Client) StartContainer(ctx context.Context, id string) error {
 	return c.do(ctx, http.MethodPost, "/containers/"+url.PathEscape(id)+"/start", nil, nil, nil)
 }
 
-// RemoveContainer kills and removes a container with its anonymous volumes.
+// RemoveContainer kills and removes a container. Its volumes are kept:
+// repeaters have none, and a container removed by mistake must not take
+// data with it.
 func (c *Client) RemoveContainer(ctx context.Context, id string) error {
-	q := url.Values{"force": {"1"}, "v": {"1"}}
+	q := url.Values{"force": {"1"}}
 	return c.do(ctx, http.MethodDelete, "/containers/"+url.PathEscape(id), q, nil, nil)
 }
 

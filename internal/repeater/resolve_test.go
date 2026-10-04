@@ -3,7 +3,9 @@ package repeater
 import (
 	"context"
 	"errors"
+	"maps"
 	"slices"
+	"strings"
 	"testing"
 	"time"
 
@@ -53,121 +55,175 @@ func newFake(t *testing.T) *dockertest.Fake {
 	return fake
 }
 
+// newResolver resolves on fake with Dokploy's compose directory.
+func newResolver(t *testing.T, fake *dockertest.Fake) resolver {
+	t.Helper()
+	return resolver{docker: newClient(t, fake), composeDir: DefaultComposeDir}
+}
+
+// composeLabels are the labels docker compose sets on the containers of
+// a service Dokploy deployed for project.
+func composeLabels(project, service string) map[string]string {
+	return map[string]string{
+		"com.docker.compose.project":              project,
+		"com.docker.compose.service":              service,
+		"com.docker.compose.project.working_dir":  DefaultComposeDir + "/" + project + "/code",
+		"com.docker.compose.project.config_files": DefaultComposeDir + "/" + project + "/code/docker-compose.yml",
+	}
+}
+
+// with returns labels with extra added.
+func with(labels map[string]string, extra map[string]string) map[string]string {
+	m := maps.Clone(labels)
+	maps.Copy(m, extra)
+	return m
+}
+
+// swarmLabels are the labels Swarm sets on a task's container.
 func swarmLabels(service string) map[string]string {
 	return map[string]string{"com.docker.swarm.service.name": service, "com.docker.swarm.task.id": "t1"}
 }
 
+// swarmService is a Swarm service with one running task on the given
+// networks, as "<network ID>=<address/prefix>" pairs.
+type swarmService struct {
+	service docker.Service
+	// container is the task's container ID; it is local only when the
+	// test adds the container.
+	container string
+	addresses map[string]string
+}
+
+func (s swarmService) add(fake *dockertest.Fake) {
+	fake.AddService(s.service)
+	task := docker.Task{ID: "task-" + s.service.ID, ServiceID: s.service.ID}
+	task.Status.ContainerStatus.ContainerID = s.container
+	for _, id := range slices.Sorted(maps.Keys(s.addresses)) {
+		att := docker.TaskNetwork{Addresses: []string{s.addresses[id]}}
+		att.Network.ID = id
+		task.NetworksAttachments = append(task.NetworksAttachments, att)
+	}
+	fake.AddTask(task)
+}
+
+func service(id, name string) docker.Service {
+	return docker.Service{ID: id, Spec: docker.ServiceSpec{Name: name}}
+}
+
 func TestResolve(t *testing.T) {
+	stackService := service("s1", "mystack_postgres")
+	stackService.Spec.Labels = map[string]string{"com.docker.stack.namespace": "mystack"}
 	tests := []struct {
 		name        string
 		containers  []dockertest.Container
-		services    []docker.Service
+		services    []swarmService
 		target      Target
-		wantHost    string
+		wantAddr    string
 		wantNetwork string
 		wantPorts   []Port
 		wantErr     error
 	}{
 		{
 			name: "application on dokploy-network",
+			services: []swarmService{{service: service("s1", "myapp-web"), container: "c1",
+				addresses: map[string]string{"net-ingress": "10.0.0.5/24", "net-dokploy": "10.0.1.7/24"}}},
 			containers: []dockertest.Container{{
 				ID: "c1", Name: "myapp-web.1.abc", Running: true, Labels: swarmLabels("myapp-web"),
 				ExposedPorts: []string{"3000/tcp", "9090/udp"},
-				Networks:     map[string][]string{"ingress": nil, "dokploy-network": {"c1short"}},
+				Networks:     map[string][]string{"ingress": nil, "dokploy-network": nil},
 			}},
 			target:      Target{Kind: KindSwarmService, AppName: "myapp-web"},
-			wantHost:    "myapp-web",
+			wantAddr:    "10.0.1.7",
 			wantNetwork: "dokploy-network",
 			wantPorts:   []Port{{3000, "tcp"}, {9090, "udp"}},
 		},
 		{
 			name: "database on a custom network prefers it over dokploy-network",
-			containers: []dockertest.Container{{
-				ID: "c1", Name: "myapp-db.1.abc", Running: true, Labels: swarmLabels("myapp-db"),
-				ExposedPorts: []string{"5432/tcp"},
-				Networks:     map[string][]string{"dokploy-network": nil, "team-net": nil},
-			}},
+			services: []swarmService{{service: service("s1", "myapp-db"),
+				addresses: map[string]string{"net-dokploy": "10.0.1.8/24", "net-team": "10.0.2.8/24"}}},
 			target:      Target{Kind: KindSwarmService, AppName: "myapp-db"},
-			wantHost:    "myapp-db",
+			wantAddr:    "10.0.2.8",
 			wantNetwork: "team-net",
-			wantPorts:   []Port{{5432, "tcp"}},
 		},
 		{
-			name: "compose service on its project network by service name",
+			name: "Swarm task on another node",
+			services: []swarmService{{service: service("s1", "myapp-web"), container: "elsewhere",
+				addresses: map[string]string{"net-dokploy": "10.0.1.9/24"}}},
+			target:      Target{Kind: KindSwarmService, AppName: "myapp-web"},
+			wantAddr:    "10.0.1.9",
+			wantNetwork: "dokploy-network",
+		},
+		{
+			name: "compose service on its project network",
 			containers: []dockertest.Container{{
-				ID: "c1", Name: "myapp-postgres-1", Running: true,
-				Labels:       map[string]string{"com.docker.compose.project": "myapp", "com.docker.compose.service": "postgres"},
+				ID: "c1", Name: "myapp-postgres-1", Running: true, Labels: composeLabels("myapp", "postgres"),
 				ExposedPorts: []string{"5432/tcp"},
-				Networks:     map[string][]string{"dokploy-network": {"postgres"}, "myapp_default": {"postgres", "myapp-postgres-1"}},
+				Networks:     map[string][]string{"dokploy-network": {"postgres"}, "myapp_default": {"postgres"}},
+				IPs:          map[string]string{"dokploy-network": "10.0.1.3", "myapp_default": "172.20.0.3"},
 			}},
 			target:      Target{Kind: KindCompose, AppName: "myapp", Service: "postgres"},
-			wantHost:    "postgres",
+			wantAddr:    "172.20.0.3",
 			wantNetwork: "myapp_default",
 			wantPorts:   []Port{{5432, "tcp"}},
 		},
 		{
-			name: "compose service only on a shared network by container name",
+			name: "compose service only on a shared network",
 			containers: []dockertest.Container{{
-				ID: "c1", Name: "myapp-postgres-1", Running: true,
-				Labels:   map[string]string{"com.docker.compose.project": "myapp", "com.docker.compose.service": "postgres"},
+				ID: "c1", Name: "myapp-postgres-1", Running: true, Labels: composeLabels("myapp", "postgres"),
 				Networks: map[string][]string{"dokploy-network": {"postgres"}},
+				IPs:      map[string]string{"dokploy-network": "10.0.1.3"},
 			}},
 			target:      Target{Kind: KindCompose, AppName: "myapp", Service: "postgres"},
-			wantHost:    "myapp-postgres-1",
+			wantAddr:    "10.0.1.3",
 			wantNetwork: "dokploy-network",
+		},
+		{
+			name: "compose replicas that agree",
+			containers: []dockertest.Container{
+				{ID: "c2", Name: "myapp-postgres-2", Running: true, Labels: composeLabels("myapp", "postgres"),
+					Networks: map[string][]string{"myapp_default": nil}, IPs: map[string]string{"myapp_default": "172.20.0.4"}},
+				{ID: "c1", Name: "myapp-postgres-1", Running: true, Labels: composeLabels("myapp", "postgres"),
+					Networks: map[string][]string{"myapp_default": nil}, IPs: map[string]string{"myapp_default": "172.20.0.3"}},
+			},
+			target:      Target{Kind: KindCompose, AppName: "myapp", Service: "postgres"},
+			wantAddr:    "172.20.0.3",
+			wantNetwork: "myapp_default",
 		},
 		{
 			name: "compose service of another project is not matched",
 			containers: []dockertest.Container{{
-				ID: "c1", Name: "other-postgres-1", Running: true,
-				Labels:   map[string]string{"com.docker.compose.project": "other", "com.docker.compose.service": "postgres"},
+				ID: "c1", Name: "other-postgres-1", Running: true, Labels: composeLabels("other", "postgres"),
 				Networks: map[string][]string{"dokploy-network": nil},
 			}},
 			target:  Target{Kind: KindCompose, AppName: "myapp", Service: "postgres"},
 			wantErr: ErrTargetUnreachable,
 		},
 		{
-			name: "stack service by its Swarm service name",
-			containers: []dockertest.Container{{
-				ID: "c1", Name: "mystack_postgres.1.abc", Running: true,
-				Labels: map[string]string{"com.docker.stack.namespace": "mystack", "com.docker.swarm.service.name": "mystack_postgres"},
-				Networks: map[string][]string{
-					"dokploy-network": nil, "mystack_default": {"postgres"},
-				},
-			}},
+			name: "stack service by its Swarm service",
+			services: []swarmService{{service: stackService,
+				addresses: map[string]string{"net-dokploy": "10.0.1.4/24", "net-mystack": "10.0.3.4/24"}}},
 			target:      Target{Kind: KindStack, AppName: "mystack", Service: "postgres"},
-			wantHost:    "mystack_postgres",
+			wantAddr:    "10.0.3.4",
 			wantNetwork: "mystack_default",
 		},
 		{
-			name: "Swarm service without a local container",
-			services: []docker.Service{{ID: "s1", Spec: docker.ServiceSpec{Name: "myapp-web",
-				TaskTemplate: docker.TaskTemplate{Networks: []docker.NetworkAttachment{{Target: "net-dokploy"}}}}}},
-			target:      Target{Kind: KindSwarmService, AppName: "myapp-web"},
-			wantHost:    "myapp-web",
-			wantNetwork: "dokploy-network",
-		},
-		{
 			name: "only non-attachable overlays",
-			containers: []dockertest.Container{{
-				ID: "c1", Name: "myapp-db.1.abc", Running: true, Labels: swarmLabels("myapp-db"),
-				Networks: map[string][]string{"ingress": nil, "closed-net": nil},
-			}},
+			services: []swarmService{{service: service("s1", "myapp-db"),
+				addresses: map[string]string{"net-ingress": "10.0.0.5/24", "net-closed": "10.0.4.5/24"}}},
 			target:  Target{Kind: KindSwarmService, AppName: "myapp-db"},
 			wantErr: ErrNetworkNotAttachable,
 		},
 		{
-			name: "only the default bridge, which has no DNS",
+			name: "only the default bridge",
 			containers: []dockertest.Container{{
-				ID: "c1", Name: "myapp-postgres-1", Running: true,
-				Labels:   map[string]string{"com.docker.compose.project": "myapp", "com.docker.compose.service": "postgres"},
+				ID: "c1", Name: "myapp-postgres-1", Running: true, Labels: composeLabels("myapp", "postgres"),
 				Networks: map[string][]string{"bridge": nil},
 			}},
 			target:  Target{Kind: KindCompose, AppName: "myapp", Service: "postgres"},
 			wantErr: ErrTargetUnreachable,
 		},
 		{
-			name:    "nothing running",
+			name:    "no Swarm service",
 			target:  Target{Kind: KindSwarmService, AppName: "myapp-web"},
 			wantErr: ErrTargetUnreachable,
 		},
@@ -189,20 +245,20 @@ func TestResolve(t *testing.T) {
 				fake.AddContainer(c)
 			}
 			for _, s := range tt.services {
-				fake.AddService(s)
+				s.add(fake)
 			}
-			got, err := Resolve(testContext(t), newClient(t, fake), tt.target)
+			got, err := newResolver(t, fake).resolve(testContext(t), tt.target)
 			if tt.wantErr != nil {
 				if !errors.Is(err, tt.wantErr) {
-					t.Fatalf("Resolve error = %v, want %v", err, tt.wantErr)
+					t.Fatalf("resolve error = %v, want %v", err, tt.wantErr)
 				}
 				return
 			}
 			if err != nil {
-				t.Fatalf("Resolve: %v", err)
+				t.Fatalf("resolve: %v", err)
 			}
-			if got.Host != tt.wantHost || got.Network.Name != tt.wantNetwork {
-				t.Errorf("Resolve = host %q on %q, want %q on %q", got.Host, got.Network.Name, tt.wantHost, tt.wantNetwork)
+			if got.Addr.String() != tt.wantAddr || got.Network.Name != tt.wantNetwork {
+				t.Errorf("resolve = %s on %q, want %s on %q", got.Addr, got.Network.Name, tt.wantAddr, tt.wantNetwork)
 			}
 			if !slices.Equal(got.ExposedPorts, tt.wantPorts) {
 				t.Errorf("ExposedPorts = %v, want %v", got.ExposedPorts, tt.wantPorts)
@@ -213,11 +269,246 @@ func TestResolve(t *testing.T) {
 
 func TestResolve_NotAttachableNamesTheNetworks(t *testing.T) {
 	fake := newFake(t)
-	fake.AddContainer(dockertest.Container{ID: "c1", Name: "db", Running: true, Labels: swarmLabels("myapp-db"),
-		Networks: map[string][]string{"closed-net": nil}})
-	_, err := Resolve(testContext(t), newClient(t, fake), Target{Kind: KindSwarmService, AppName: "myapp-db"})
+	swarmService{service: service("s1", "myapp-db"), addresses: map[string]string{"net-closed": "10.0.4.5/24"}}.add(fake)
+	_, err := newResolver(t, fake).resolve(testContext(t), Target{Kind: KindSwarmService, AppName: "myapp-db"})
 	var nae *NotAttachableError
 	if !errors.As(err, &nae) || !slices.Equal(nae.Networks, []string{"closed-net"}) {
 		t.Errorf("error = %v, want a *NotAttachableError naming closed-net", err)
 	}
+}
+
+// TestResolve_ComposeIgnoresSpoofedLabels covers containers another tenant
+// could run with a victim's Compose labels, named to sort first.
+func TestResolve_ComposeIgnoresSpoofedLabels(t *testing.T) {
+	victim := dockertest.Container{ID: "victim", Name: "myapp-postgres-1", Running: true, Labels: composeLabels("myapp", "postgres"),
+		Networks: map[string][]string{"myapp_default": {"postgres"}}, IPs: map[string]string{"myapp_default": "172.20.0.3"}}
+	target := Target{Kind: KindCompose, AppName: "myapp", Service: "postgres"}
+	tests := []struct {
+		name     string
+		attacker dockertest.Container
+		victim   bool
+		wantErr  bool
+	}{
+		{
+			// A stack file may set any container label; Swarm adds its own.
+			name: "Swarm task with copied Compose labels",
+			attacker: dockertest.Container{Labels: with(composeLabels("myapp", "postgres"), map[string]string{
+				"com.docker.swarm.service.name": "evil_db", "com.docker.stack.namespace": "evil"})},
+			victim: true,
+		},
+		{
+			name: "container deployed from another directory",
+			attacker: dockertest.Container{Labels: with(composeLabels("myapp", "postgres"), map[string]string{
+				"com.docker.compose.project.working_dir": "/home/evil/myapp"})},
+			victim: true,
+		},
+		{
+			name: "directory that only shares a prefix",
+			attacker: dockertest.Container{Labels: with(composeLabels("myapp", "postgres"), map[string]string{
+				"com.docker.compose.project.working_dir": DefaultComposeDir + "/myapp-evil/code"})},
+			victim: true,
+		},
+		{
+			name: "directory escaping with dot-dot",
+			attacker: dockertest.Container{Labels: with(composeLabels("myapp", "postgres"), map[string]string{
+				"com.docker.compose.project.working_dir": DefaultComposeDir + "/myapp/../evil"})},
+			victim: true,
+		},
+		{
+			name: "no project directory",
+			attacker: dockertest.Container{Labels: map[string]string{
+				"com.docker.compose.project": "myapp", "com.docker.compose.service": "postgres"}},
+			victim: true,
+		},
+		{
+			name:     "only a container from another directory",
+			attacker: dockertest.Container{Labels: with(composeLabels("myapp", "postgres"), map[string]string{"com.docker.compose.project.working_dir": "/srv/x"})},
+			wantErr:  true,
+		},
+		{
+			name:     "only a Swarm task with copied labels",
+			attacker: dockertest.Container{Labels: with(composeLabels("myapp", "postgres"), swarmLabels("evil_db"))},
+			wantErr:  true,
+		},
+		{
+			// Both pass every check yet are on different networks: refuse
+			// rather than guess.
+			name:     "matching containers that disagree",
+			attacker: dockertest.Container{Labels: composeLabels("myapp", "postgres")},
+			victim:   true,
+			wantErr:  true,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			fake := newFake(t)
+			if tt.victim {
+				fake.AddContainer(victim)
+			}
+			a := tt.attacker
+			a.ID, a.Name, a.Running = "0-attacker", "aaa-attacker", true
+			a.Networks = map[string][]string{"team-net": nil}
+			fake.AddContainer(a)
+
+			got, err := newResolver(t, fake).resolve(testContext(t), target)
+			if tt.wantErr {
+				if !errors.Is(err, ErrTargetUnreachable) {
+					t.Fatalf("resolve = %+v, %v; want %v", got, err, ErrTargetUnreachable)
+				}
+				return
+			}
+			if err != nil || got.ContainerID != "victim" || got.Addr.String() != "172.20.0.3" {
+				t.Fatalf("resolve = container %q at %s, %v; want the victim's own container", got.ContainerID, got.Addr, err)
+			}
+		})
+	}
+}
+
+// TestResolve_ComposeRefusesSwarmLabelFallback: a Compose container's
+// Swarm service label never redirects the tunnel.
+func TestResolve_ComposeRefusesSwarmLabelFallback(t *testing.T) {
+	fake := newFake(t)
+	fake.AddContainer(dockertest.Container{ID: "c1", Name: "myapp-postgres-1", Running: true,
+		Labels:   with(composeLabels("myapp", "postgres"), map[string]string{"com.docker.swarm.service.name": "dokploy-postgres"}),
+		Networks: map[string][]string{"dokploy-network": nil}})
+	got, err := newResolver(t, fake).resolve(testContext(t), Target{Kind: KindCompose, AppName: "myapp", Service: "postgres"})
+	if !errors.Is(err, ErrTargetUnreachable) {
+		t.Fatalf("resolve = %+v, %v; want a Compose candidate with Swarm labels refused", got, err)
+	}
+}
+
+// TestResolve_SwarmUsesOnlyTheSwarmAPI: containers labelled with a
+// service's name are never trusted for Swarm targets.
+func TestResolve_SwarmUsesOnlyTheSwarmAPI(t *testing.T) {
+	spoof := dockertest.Container{ID: "0-spoof", Name: "aaa-spoof", Running: true, Labels: swarmLabels("myapp-web"),
+		Networks: map[string][]string{"team-net": nil}, IPs: map[string]string{"team-net": "10.0.2.66"}}
+	target := Target{Kind: KindSwarmService, AppName: "myapp-web"}
+
+	t.Run("labelled container without a service", func(t *testing.T) {
+		fake := newFake(t)
+		fake.AddContainer(spoof)
+		if _, err := newResolver(t, fake).resolve(testContext(t), target); !errors.Is(err, ErrTargetUnreachable) {
+			t.Fatalf("resolve error = %v, want %v", err, ErrTargetUnreachable)
+		}
+	})
+	t.Run("labelled container next to the real task", func(t *testing.T) {
+		fake := newFake(t)
+		fake.AddContainer(spoof)
+		fake.AddContainer(dockertest.Container{ID: "task-ctr", Name: "myapp-web.1.x", Running: true, Labels: swarmLabels("myapp-web"),
+			Networks: map[string][]string{"dokploy-network": nil}})
+		swarmService{service: service("s1", "myapp-web"), container: "task-ctr",
+			addresses: map[string]string{"net-dokploy": "10.0.1.7/24"}}.add(fake)
+		got, err := newResolver(t, fake).resolve(testContext(t), target)
+		if err != nil || got.ContainerID != "task-ctr" || got.Addr.String() != "10.0.1.7" {
+			t.Fatalf("resolve = container %q at %s, %v; want the task's", got.ContainerID, got.Addr, err)
+		}
+	})
+	t.Run("service found by ID, not by name", func(t *testing.T) {
+		fake := newFake(t)
+		swarmService{service: service("myapp-web", "evil"), addresses: map[string]string{"net-dokploy": "10.0.1.7/24"}}.add(fake)
+		if _, err := newResolver(t, fake).resolve(testContext(t), target); !errors.Is(err, ErrTargetUnreachable) {
+			t.Fatalf("resolve error = %v, want %v", err, ErrTargetUnreachable)
+		}
+	})
+	t.Run("stack service outside the stack", func(t *testing.T) {
+		fake := newFake(t)
+		svc := service("s1", "mystack_postgres")
+		svc.Spec.Labels = map[string]string{"com.docker.stack.namespace": "other"}
+		swarmService{service: svc, addresses: map[string]string{"net-mystack": "10.0.3.4/24"}}.add(fake)
+		_, err := newResolver(t, fake).resolve(testContext(t), Target{Kind: KindStack, AppName: "mystack", Service: "postgres"})
+		if !errors.Is(err, ErrTargetUnreachable) {
+			t.Fatalf("resolve error = %v, want %v", err, ErrTargetUnreachable)
+		}
+	})
+	t.Run("task not running yet", func(t *testing.T) {
+		fake := newFake(t)
+		fake.AddService(service("s1", "myapp-web"))
+		task := docker.Task{ID: "t1", ServiceID: "s1"}
+		task.Status.State = "starting"
+		fake.AddTask(task)
+		if _, err := newResolver(t, fake).resolve(testContext(t), target); !errors.Is(err, ErrTargetUnreachable) {
+			t.Fatalf("resolve error = %v, want %v", err, ErrTargetUnreachable)
+		}
+	})
+}
+
+func TestReservedAppName(t *testing.T) {
+	for name, want := range map[string]bool{
+		"dokploy": true, "dokploy-postgres": true, "dokploy-redis": true, "dokploy-traefik": true, "dokploy-x": true,
+		"dokployapp": false, "my-dokploy": false, "shop-pg": false,
+	} {
+		if got := reservedAppName(name); got != want {
+			t.Errorf("reservedAppName(%q) = %v, want %v", name, got, want)
+		}
+	}
+}
+
+func TestResolve_RefusesReservedNamesBeforeDocker(t *testing.T) {
+	for _, target := range []Target{
+		{Kind: KindSwarmService, AppName: "dokploy"},
+		{Kind: KindSwarmService, AppName: "dokploy-postgres"},
+		{Kind: KindStack, AppName: "dokploy-x", Service: "db"},
+		{Kind: KindCompose, AppName: "dokploy-traefik", Service: "traefik"},
+	} {
+		t.Run(target.String(), func(t *testing.T) {
+			fake := newFake(t)
+			_, err := newResolver(t, fake).resolve(testContext(t), target)
+			if !errors.Is(err, ErrTargetUnreachable) || !strings.Contains(err.Error(), "reserved") {
+				t.Fatalf("resolve error = %v, want the reserved name refused", err)
+			}
+			if v := fake.Versions(); len(v) != 0 {
+				t.Errorf("Docker was asked about a reserved name (API versions used: %v)", v)
+			}
+		})
+	}
+}
+
+func TestResolve_RefusesHostLevelTargets(t *testing.T) {
+	socket := []docker.Mount{{Type: "bind", Source: "/var/run/docker.sock", Destination: "/var/run/docker.sock"}}
+	tests := []struct {
+		name string
+		ctr  dockertest.Container
+	}{
+		{"privileged", dockertest.Container{Privileged: true}},
+		{"host network", dockertest.Container{NetworkMode: "host"}},
+		{"Docker socket mount", dockertest.Container{Mounts: socket}},
+		{"Docker socket at another path", dockertest.Container{Mounts: []docker.Mount{{Type: "bind", Source: "/run/user/1000/docker.sock", Destination: "/sock/docker.sock"}}}},
+		{"Docker socket bind", dockertest.Container{Binds: []string{"/run/docker.sock:/var/run/docker.sock:ro"}}},
+	}
+	for _, tt := range tests {
+		t.Run("compose "+tt.name, func(t *testing.T) {
+			fake := newFake(t)
+			c := tt.ctr
+			c.ID, c.Name, c.Running, c.Labels = "c1", "myapp-postgres-1", true, composeLabels("myapp", "postgres")
+			c.Networks = map[string][]string{"myapp_default": nil}
+			fake.AddContainer(c)
+			_, err := newResolver(t, fake).resolve(testContext(t), Target{Kind: KindCompose, AppName: "myapp", Service: "postgres"})
+			if !errors.Is(err, ErrTargetUnreachable) || !strings.Contains(err.Error(), "refusing") {
+				t.Fatalf("resolve error = %v, want the target refused", err)
+			}
+		})
+		t.Run("Swarm "+tt.name, func(t *testing.T) {
+			fake := newFake(t)
+			c := tt.ctr
+			c.ID, c.Name, c.Running, c.Labels = "c1", "myapp-web.1.x", true, swarmLabels("myapp-web")
+			c.Networks = map[string][]string{"dokploy-network": nil}
+			fake.AddContainer(c)
+			swarmService{service: service("s1", "myapp-web"), container: "c1",
+				addresses: map[string]string{"net-dokploy": "10.0.1.7/24"}}.add(fake)
+			_, err := newResolver(t, fake).resolve(testContext(t), Target{Kind: KindSwarmService, AppName: "myapp-web"})
+			if !errors.Is(err, ErrTargetUnreachable) || !strings.Contains(err.Error(), "refusing") {
+				t.Fatalf("resolve error = %v, want the target refused", err)
+			}
+		})
+	}
+	t.Run("Swarm service spec mounting the socket", func(t *testing.T) {
+		fake := newFake(t)
+		svc := service("s1", "myapp-web")
+		svc.Spec.TaskTemplate.ContainerSpec.Mounts = []docker.ServiceMount{{Type: "bind", Source: "/var/run/docker.sock", Target: "/var/run/docker.sock"}}
+		swarmService{service: svc, container: "remote", addresses: map[string]string{"net-dokploy": "10.0.1.7/24"}}.add(fake)
+		_, err := newResolver(t, fake).resolve(testContext(t), Target{Kind: KindSwarmService, AppName: "myapp-web"})
+		if !errors.Is(err, ErrTargetUnreachable) || !strings.Contains(err.Error(), "Docker socket") {
+			t.Fatalf("resolve error = %v, want the service refused", err)
+		}
+	})
 }

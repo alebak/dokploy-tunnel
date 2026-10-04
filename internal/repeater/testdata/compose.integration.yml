@@ -1,0 +1,9 @@
+# Target of the integration tests: a docker compose project with one
+# service that echoes TCP connections on port 7000, declared with expose so
+# that its image config reports the port.
+services:
+  echo:
+    image: alpine/socat:1.8.1.1@sha256:7f9a06753033f2b7de18edc2353f2c15153413d95a039163c6db270fc7a6c3b0
+    command: ["TCP-LISTEN:7000,fork,reuseaddr", "EXEC:cat"]
+    expose:
+      - "7000"

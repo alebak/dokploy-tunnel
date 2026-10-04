@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"net/netip"
 	"strconv"
 	"strings"
 	"sync"
@@ -40,12 +41,15 @@ func (r *Repeater) Open(ctx context.Context, t Target) (*Stream, error) {
 	if t.Port < 1 || t.Port > 65535 {
 		return nil, fmt.Errorf("%w: invalid port %d", ErrTargetUnreachable, t.Port)
 	}
-	ep, err := Resolve(ctx, r.docker, t)
+	ep, err := r.Resolve(ctx, t)
 	if err != nil {
 		return nil, err
 	}
+	// The address comes from the daemon, never from a name: socat dials
+	// exactly the container Docker reports for the target.
+	dest := netip.AddrPortFrom(ep.Addr, uint16(t.Port))
 	cmd := []string{"socat", "-d", "-d", "STDIO",
-		"TCP:" + ep.Host + ":" + strconv.Itoa(t.Port) + ",connect-timeout=" + strconv.Itoa(connectTimeoutSeconds)}
+		"TCP:" + dest.String() + ",connect-timeout=" + strconv.Itoa(connectTimeoutSeconds)}
 
 	// A repeater that died since it was created is replaced once.
 	for attempt := 0; ; attempt++ {
@@ -155,8 +159,26 @@ func (s *Stream) Close() error {
 	return err
 }
 
+// Resolve finds where a repeater can reach t: a running container or
+// Swarm task of t, its best network a standalone container may join, and
+// its address there. It fails with ErrTargetUnreachable or a
+// *NotAttachableError.
+func (r *Repeater) Resolve(ctx context.Context, t Target) (Endpoint, error) {
+	return r.resolver().resolve(ctx, t)
+}
+
 // ExposedPorts returns the ports the image of t's running container
-// exposes, as the package-level ExposedPorts.
+// exposes (Config.ExposedPorts), sorted, whatever its networks. It is
+// empty when the Swarm task runs on another node. It fails with
+// ErrTargetUnreachable when t has no running container or task.
 func (r *Repeater) ExposedPorts(ctx context.Context, t Target) ([]Port, error) {
-	return ExposedPorts(ctx, r.docker, t)
+	loc, err := r.resolver().locate(ctx, t)
+	if err != nil {
+		return nil, err
+	}
+	return loc.ep.ExposedPorts, nil
+}
+
+func (r *Repeater) resolver() resolver {
+	return resolver{docker: r.docker, composeDir: r.opts.ComposeDir}
 }
