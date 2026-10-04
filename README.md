@@ -9,7 +9,7 @@
 
 ## Status
 
-**Early development.** The release pipeline is in place, but the binaries do not implement tunneling yet. `doktunnel` can register Dokploy panels as [contexts](#contexts) and [list their services](#services); its other commands report `not_implemented`. Expect breaking changes before 1.0.0.
+**Early development.** The release pipeline is in place, but the binaries do not implement tunneling yet. `doktunnel` can register Dokploy panels as [contexts](#contexts) and [list their services](#services); its other commands report `not_implemented`. `doktunnel-companion` serves the tunnel endpoint and authorizes requests, but cannot reach services yet (see [Companion](#companion-server)). Expect breaking changes before 1.0.0.
 
 ## Install
 
@@ -42,7 +42,7 @@ Download the archive for your platform from [Releases](https://github.com/alebak
 
 ### Companion
 
-`doktunnel-companion` archives are attached to each release for Linux amd64 and arm64. A supported installation method (a container image) will be documented once the companion is functional.
+`doktunnel-companion` archives are attached to each release for Linux amd64 and arm64. A supported installation method (a container image) will be documented once the companion is functional; see [Companion server](#companion-server) for what it does and how it is configured.
 
 ## Usage
 
@@ -186,6 +186,33 @@ doktunnel --skill > ~/.claude/skills/doktunnel/SKILL.md
 # Any agent that reads SKILL.md files
 doktunnel --skill > <agent skills dir>/doktunnel/SKILL.md
 ```
+
+## Companion server
+
+`doktunnel-companion` is the server-side half of dokploy-tunnel. A Dokploy administrator installs one on each Dokploy server whose services should be reachable: on the Dokploy server itself, and on each remote server Dokploy deploys to. `doktunnel` opens one WebSocket to it for every local TCP connection; the [wire protocol](docs/protocol.md) is documented separately.
+
+> **Work in progress.** The companion authorizes tunnels, but forwarding to services is not implemented yet: authorized requests are refused with `target_unreachable`. A supported installation method will be documented once it is functional.
+
+It is configured with flags or environment variables; flags win:
+
+| Flag | Environment variable | Default | Purpose |
+|------|----------------------|---------|---------|
+| `--dokploy-url` | `DOKTUNNEL_COMPANION_DOKPLOY_URL` | required | URL of the Dokploy panel, as reachable from the companion, such as `http://dokploy:3000` |
+| `--server-id` | `DOKTUNNEL_COMPANION_SERVER_ID` | empty | ID of the Dokploy server the companion runs on; empty or `local` for the Dokploy server itself |
+| `--listen` | `DOKTUNNEL_COMPANION_LISTEN` | `:8080` | TCP address to serve on |
+| `--version` | | | Print the version and exit |
+
+`GET /healthz` answers `200` with `{"status":"ok"}` while the companion accepts tunnels. On `SIGINT` or `SIGTERM` it stops accepting tunnels, closes open ones with the WebSocket "going away" code, and exits within 30 seconds. Logs are written to stderr; they never contain API keys.
+
+The companion serves plain HTTP. Put it behind a TLS-terminating proxy, such as the Traefik instance Dokploy already runs, because every tunnel request carries the caller's API key.
+
+### Security and permissions
+
+The companion holds no credentials and keeps no permissions of its own. Every tunnel request carries the caller's own Dokploy API key, and the companion asks the Dokploy API, with that key, whether it can read the target service (`<type>.one`, such as `postgres.one`; for a service inside a compose stack, `compose.one` and then `compose.loadServices` with `type=cache` to check the service exists). Only if Dokploy answers is the tunnel opened. It never calls organization-wide or Docker-wide Dokploy endpoints.
+
+**Read access to a service is enough to forward to it.** Dokploy's own container terminal, which opens a root shell inside the container, only requires read access to the service (`canAccessDockerOverWss` in Dokploy's `apps/dokploy/server/wss/authorize.ts`). A TCP tunnel grants less than a shell, so requiring more would be stricter than Dokploy without a real security gain. Owner and admin keys can forward to every service in their organization; member keys only to the services they were granted.
+
+Invalid keys, keys of another organization, services the key cannot read, and services that do not exist are all rejected alike, with `permission_denied`, before anything else happens. A companion only forwards to services deployed on its own Dokploy server and refuses others with `wrong_server`, naming the server the service runs on.
 
 ## Releases and versioning
 
