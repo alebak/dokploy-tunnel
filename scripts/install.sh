@@ -9,6 +9,15 @@ set -euo pipefail
 # Environment variables:
 #   DOKTUNNEL_VERSION      Version to install (e.g. 0.1.0 or v0.1.0). Default: latest release.
 #   DOKTUNNEL_INSTALL_DIR  Target directory. Default: ~/.local/bin (no sudo required).
+#
+# Test only (never needed to install doktunnel):
+#   DOKTUNNEL_TEST_DOWNLOAD_BASE
+#                          Download the archive and checksums.txt from this
+#                          http://127.0.0.1:<port>[/path] or http://localhost:<port>[/path]
+#                          URL instead of the GitHub release. The platform CI
+#                          workflow uses it to install locally built snapshot
+#                          artifacts. Requires DOKTUNNEL_VERSION; the checksum is
+#                          still verified.
 
 GITHUB_OWNER="alebak"
 GITHUB_REPO="dokploy-tunnel"
@@ -97,8 +106,18 @@ main() {
 
     info "\n${CYAN}${BOLD}dokploy-tunnel — doktunnel installer${NC}\n"
 
-    local platform version archive base_url install_dir expected actual
+    local platform version archive base_url install_dir expected actual test_base
     platform="$(detect_platform)"
+
+    # Only this machine is accepted, so the override cannot point an install
+    # at another server.
+    test_base="${DOKTUNNEL_TEST_DOWNLOAD_BASE:-}"
+    if [ -n "$test_base" ]; then
+        test_base="${test_base%/}"
+        [[ "$test_base" =~ ^http://(127\.0\.0\.1|localhost):[0-9]+(/[A-Za-z0-9._/-]*)?$ ]] \
+            || die "DOKTUNNEL_TEST_DOWNLOAD_BASE is test-only and must be http://127.0.0.1:<port> or http://localhost:<port>"
+        [ -n "${DOKTUNNEL_VERSION:-}" ] || die "DOKTUNNEL_TEST_DOWNLOAD_BASE requires DOKTUNNEL_VERSION"
+    fi
 
     if [ -n "${DOKTUNNEL_VERSION:-}" ]; then
         version="${DOKTUNNEL_VERSION#v}"
@@ -107,7 +126,7 @@ main() {
     fi
 
     archive="${BINARY_NAME}_${version}_${platform}.tar.gz"
-    base_url="https://github.com/${GITHUB_OWNER}/${GITHUB_REPO}/releases/download/v${version}"
+    base_url="${test_base:-https://github.com/${GITHUB_OWNER}/${GITHUB_REPO}/releases/download/v${version}}"
     install_dir="${DOKTUNNEL_INSTALL_DIR:-${HOME}/.local/bin}"
     WORK_DIR="$(mktemp -d)"
 
