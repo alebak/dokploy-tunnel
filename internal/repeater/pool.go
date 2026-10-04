@@ -43,6 +43,9 @@ const (
 	LabelCreatedAt = "dev.doktunnel.created-at"
 )
 
+// errClosed means the Repeater was closed.
+var errClosed = errors.New("the repeater is closed")
+
 // removeTimeout bounds removing one repeater.
 const removeTimeout = 30 * time.Second
 
@@ -122,7 +125,7 @@ func (r *Repeater) acquire(ctx context.Context, ep Endpoint) (string, func(), er
 	r.mu.Lock()
 	if r.closed {
 		r.mu.Unlock()
-		return "", nil, errors.New("the repeater is closed")
+		return "", nil, errClosed
 	}
 	e, exists := r.entries[key]
 	if !exists {
@@ -147,7 +150,7 @@ func (r *Repeater) acquire(ctx context.Context, ep Endpoint) (string, func(), er
 		r.mu.Lock()
 		if err == nil && r.closed {
 			r.removeLocked(id, "companion stopping")
-			err = errors.New("the repeater is closed")
+			err = errClosed
 		}
 		e.id, e.err = id, err
 		if err != nil && r.entries[key] == e {

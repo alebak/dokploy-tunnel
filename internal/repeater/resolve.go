@@ -150,25 +150,58 @@ type candidate struct {
 // and the best of its networks a standalone container may join. It fails
 // with ErrTargetUnreachable or a *NotAttachableError.
 func Resolve(ctx context.Context, c *docker.Client, t Target) (Endpoint, error) {
-	labels, swarmService, err := t.selector()
+	loc, err := locate(ctx, c, t)
 	if err != nil {
 		return Endpoint{}, err
 	}
+	return chooseNetwork(ctx, c, t, loc)
+}
+
+// ExposedPorts returns the ports the image of t's running container
+// exposes (Config.ExposedPorts), sorted, whatever its networks. It is
+// empty when no task of a Swarm service runs on this node. It fails with
+// ErrTargetUnreachable when t has no running container or service.
+func ExposedPorts(ctx context.Context, c *docker.Client, t Target) ([]Port, error) {
+	loc, err := locate(ctx, c, t)
+	if err != nil {
+		return nil, err
+	}
+	return loc.ep.ExposedPorts, nil
+}
+
+// located is a target's container, or its Swarm service, with the networks
+// it is attached to.
+type located struct {
+	// ep has ContainerID and ExposedPorts, and for a Compose container its
+	// container name as Host.
+	ep           Endpoint
+	swarmService string
+	// attached maps network IDs or names to the target's names there.
+	attached map[string][]string
+}
+
+// locate finds t's running container, or its Swarm service when no task
+// runs on this node.
+func locate(ctx context.Context, c *docker.Client, t Target) (located, error) {
+	labels, swarmService, err := t.selector()
+	if err != nil {
+		return located{}, err
+	}
 	found, err := c.ListContainers(ctx, docker.ListOptions{Labels: labels})
 	if err != nil {
-		return Endpoint{}, fmt.Errorf("listing the target's containers: %w", err)
+		return located{}, fmt.Errorf("listing the target's containers: %w", err)
 	}
 	slices.SortFunc(found, func(a, b docker.ContainerSummary) int {
 		return cmp.Compare(strings.Join(a.Names, ","), strings.Join(b.Names, ","))
 	})
 
 	var ep Endpoint
-	var attached map[string][]string // network ID or name → names there
+	var attached map[string][]string
 	switch {
 	case len(found) > 0:
 		ctr, err := c.InspectContainer(ctx, found[0].ID)
 		if err != nil {
-			return Endpoint{}, fmt.Errorf("inspecting the target's container: %w", err)
+			return located{}, fmt.Errorf("inspecting the target's container: %w", err)
 		}
 		ep.ContainerID = ctr.ID
 		ep.ExposedPorts = exposedPorts(ctr.Config.ExposedPorts)
@@ -189,22 +222,28 @@ func Resolve(ctx context.Context, c *docker.Client, t Target) (Endpoint, error) 
 		// resolves on its overlay networks.
 		svc, err := c.InspectService(ctx, swarmService)
 		if docker.IsNotFound(err) {
-			return Endpoint{}, fmt.Errorf("%w: no running container or Swarm service %s", ErrTargetUnreachable, swarmService)
+			return located{}, fmt.Errorf("%w: no running container or Swarm service %s", ErrTargetUnreachable, swarmService)
 		}
 		if err != nil {
-			return Endpoint{}, fmt.Errorf("inspecting Swarm service %s: %w", swarmService, err)
+			return located{}, fmt.Errorf("inspecting Swarm service %s: %w", swarmService, err)
 		}
 		attached = map[string][]string{}
 		for _, n := range svc.Spec.TaskTemplate.Networks {
 			attached[n.Target] = n.Aliases
 		}
 	default:
-		return Endpoint{}, fmt.Errorf("%w: no running container of %s/%s", ErrTargetUnreachable, t.AppName, t.Service)
+		return located{}, fmt.Errorf("%w: no running container of %s/%s", ErrTargetUnreachable, t.AppName, t.Service)
 	}
+	return located{ep: ep, swarmService: swarmService, attached: attached}, nil
+}
 
+// chooseNetwork picks the best network of loc a repeater may join, and
+// the target's name there.
+func chooseNetwork(ctx context.Context, c *docker.Client, t Target, loc located) (Endpoint, error) {
+	ep, swarmService := loc.ep, loc.swarmService
 	var candidates []candidate
 	var closed []string
-	for ref, names := range attached {
+	for ref, names := range loc.attached {
 		n, err := c.InspectNetwork(ctx, ref)
 		if docker.IsNotFound(err) {
 			continue
