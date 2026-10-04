@@ -65,7 +65,7 @@ func TestIfconfigLoopback_Missing(t *testing.T) {
 	if want := addrs("127.77.0.2", "127.77.0.3"); !slices.Equal(missing, want) {
 		t.Errorf("Missing = %v, want %v", missing, want)
 	}
-	if want := []string{"ifconfig lo0"}; !slices.Equal(r.calls, want) {
+	if want := []string{"/sbin/ifconfig lo0"}; !slices.Equal(r.calls, want) {
 		t.Errorf("calls = %q, want %q", r.calls, want)
 	}
 
@@ -81,8 +81,30 @@ func TestIfconfigLoopback_Add(t *testing.T) {
 	if err := l.Add(context.Background(), addrs("127.77.0.2", "127.77.0.3")); err != nil {
 		t.Fatal(err)
 	}
-	want := []string{"ifconfig lo0 alias 127.77.0.2 up", "ifconfig lo0 alias 127.77.0.3 up"}
+	want := []string{"/sbin/ifconfig lo0 alias 127.77.0.2 up", "/sbin/ifconfig lo0 alias 127.77.0.3 up"}
 	if !slices.Equal(r.calls, want) {
 		t.Errorf("calls = %q, want %q", r.calls, want)
+	}
+}
+
+// The helper runs ifconfig as root, and sudo on macOS keeps the user's PATH,
+// so ifconfig must never be looked up through PATH.
+func TestIfconfigLoopback_UsesAbsolutePath(t *testing.T) {
+	var names []string
+	run := func(_ context.Context, name string, _ ...string) ([]byte, error) {
+		names = append(names, name)
+		return []byte(ifconfigLo0), nil
+	}
+	l := ifconfigLoopback{run: run}
+	if _, err := l.Missing(context.Background(), addrs("127.77.0.2")); err != nil {
+		t.Fatal(err)
+	}
+	if err := l.Add(context.Background(), addrs("127.77.0.2")); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range names {
+		if !strings.HasPrefix(name, "/") {
+			t.Errorf("command %q is not an absolute path", name)
+		}
 	}
 }

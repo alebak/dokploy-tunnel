@@ -6,6 +6,8 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"io"
+	"io/fs"
 	"net/netip"
 	"os"
 	"path/filepath"
@@ -22,9 +24,12 @@ import (
 // cannot redirect a write made with administrator privileges.
 const hostsFileEnv = "DOKTUNNEL_HOSTS_FILE"
 
-// pendingFileName holds the entries handed to the privileged helper, next
-// to the address registry.
+// pendingFileName holds the entries handed to the privileged helper when
+// they cannot travel on its standard input, next to the address registry.
 const pendingFileName = "pending-hosts"
+
+// entriesStdin is the --entries-file value that reads standard input.
+const entriesStdin = "-"
 
 // cleanHint tells the user how to recover from malformed markers.
 const cleanHint = "run 'doktunnel hosts clean' to remove the doktunnel section, then 'doktunnel hosts sync' to write it again"
@@ -128,7 +133,7 @@ func newHostsPrivilegedApplyCommand() *Command {
 		Hidden:  true,
 		Flags: func(fs *flag.FlagSet) {
 			entriesFile, clean = "", false
-			fs.StringVar(&entriesFile, "entries-file", "", "write the doktunnel section with the entries in this `file`")
+			fs.StringVar(&entriesFile, "entries-file", "", "write the doktunnel section with the entries in this `file` (- for standard input)")
 			fs.BoolVar(&clean, "clean", false, "remove the doktunnel section")
 		},
 		Run: func(env *Env, args []string) error {
@@ -293,26 +298,12 @@ func (e *Env) applySync(ctx context.Context, target hostsTarget, next []byte, de
 		return nil
 	}
 
-	regPath, err := e.registryPath()
-	if err != nil {
-		return err
-	}
-	pending := filepath.Join(filepath.Dir(regPath), pendingFileName)
-	if err := os.MkdirAll(filepath.Dir(pending), 0o700); err != nil {
-		return fmt.Errorf("writing pending hosts entries: %w", err)
-	}
-	if err := os.WriteFile(pending, hosts.FormatEntries(desired), 0o600); err != nil {
-		return fmt.Errorf("writing pending hosts entries: %w", err)
-	}
 	what := "updating " + target.path
 	if !hostsChanged {
 		what = "adding lo0 aliases"
 	}
-	if err := e.runPrivileged(ctx, what, "--entries-file", pending); err != nil {
+	if err := e.runPrivilegedEntries(ctx, what, hosts.FormatEntries(desired)); err != nil {
 		return err
-	}
-	if err := os.Remove(pending); err != nil {
-		return fmt.Errorf("removing pending hosts entries: %w", err)
 	}
 
 	// The helper's own output may be hidden (UAC), so check its result.
@@ -327,15 +318,63 @@ func (e *Env) applySync(ctx context.Context, target hostsTarget, next []byte, de
 	return nil
 }
 
+// runPrivilegedEntries runs the privileged helper with entries, the output
+// of hosts.FormatEntries.
+//
+// The helper runs as root, so it should never open a path its caller chose:
+// a restricted sudoers rule for it would otherwise let the caller point root
+// at any file. Where the elevator passes a standard input (sudo, which
+// prompts on the terminal instead), the entries travel on it and no file is
+// written. A UAC prompt cannot pass one, so on Windows the entries go in a
+// pending file in the user's own state directory, which the helper reads
+// with the checks of hosts.ReadEntriesFile. When prompting is not allowed
+// the hint must still be runnable, so the entries also go in the pending
+// file, which the user's own shell redirects into the helper.
+func (e *Env) runPrivilegedEntries(ctx context.Context, what string, entries []byte) error {
+	regPath, err := e.registryPath()
+	if err != nil {
+		return err
+	}
+	pending := filepath.Join(filepath.Dir(regPath), pendingFileName)
+	if e.Elevator.PipesStdin() && !e.NoInput {
+		// A file a no-input run left behind is stale now.
+		if err := os.Remove(pending); err != nil && !errors.Is(err, fs.ErrNotExist) {
+			return fmt.Errorf("removing pending hosts entries: %w", err)
+		}
+		return e.runPrivileged(ctx, what, bytes.NewReader(entries), "", "--entries-file", entriesStdin)
+	}
+
+	if err := os.MkdirAll(filepath.Dir(pending), 0o700); err != nil {
+		return fmt.Errorf("writing pending hosts entries: %w", err)
+	}
+	if err := os.WriteFile(pending, entries, 0o600); err != nil {
+		return fmt.Errorf("writing pending hosts entries: %w", err)
+	}
+	if e.Elevator.PipesStdin() {
+		err = e.runPrivileged(ctx, what, nil, pending, "--entries-file", entriesStdin)
+	} else {
+		err = e.runPrivileged(ctx, what, nil, "", "--entries-file", pending)
+	}
+	if err != nil {
+		return err
+	}
+	if err := os.Remove(pending); err != nil {
+		return fmt.Errorf("removing pending hosts entries: %w", err)
+	}
+	return nil
+}
+
 // runPrivileged re-runs this binary's privileged helper with administrator
-// privileges, or explains how to when prompting is not allowed.
-func (e *Env) runPrivileged(ctx context.Context, what string, args ...string) error {
+// privileges, or explains how to when prompting is not allowed. stdin, when
+// not nil, is the helper's standard input; stdinFile is the file the hint
+// redirects into it.
+func (e *Env) runPrivileged(ctx context.Context, what string, stdin io.Reader, stdinFile string, args ...string) error {
 	exe, err := e.Executable()
 	if err != nil {
 		return fmt.Errorf("locating the doktunnel binary: %w", err)
 	}
 	argv := append([]string{exe, "hosts", "privileged-apply"}, args...)
-	command := e.Elevator.Command(argv)
+	command := e.Elevator.Command(argv, stdinFile)
 	if e.NoInput {
 		return clierr.Newf(clierr.ElevationRequired, "%s needs administrator privileges, and prompting is not allowed", what).
 			WithHint("run: " + command)
@@ -344,7 +383,7 @@ func (e *Env) runPrivileged(ctx context.Context, what string, args ...string) er
 		// With --json stderr stays silent; sudo or UAC still prompt.
 		fmt.Fprintf(e.Stderr, "doktunnel: %s needs administrator privileges; running: %s\n", what, command)
 	}
-	if err := e.Elevator.Run(ctx, argv); err != nil {
+	if err := e.Elevator.Run(ctx, argv, stdin); err != nil {
 		return clierr.Newf(clierr.ElevationRequired, "%s: %v", what, err).
 			WithHint("run it yourself: " + command)
 	}
@@ -428,7 +467,7 @@ func runHostsClean(env *Env) error {
 			return clierr.Newf(clierr.PermissionDenied, "%v", err).
 				WithHint(fmt.Sprintf("%s is set; doktunnel never elevates to write such a file", hostsFileEnv))
 		default:
-			if err := env.runPrivileged(ctx, "cleaning "+target.path, "--clean"); err != nil {
+			if err := env.runPrivileged(ctx, "cleaning "+target.path, nil, "", "--clean"); err != nil {
 				return err
 			}
 			if after, err := hosts.Read(target.path); err != nil || !bytes.Equal(hosts.Clean(after), after) {
@@ -449,8 +488,11 @@ func runHostsClean(env *Env) error {
 }
 
 // runHostsPrivilegedApply is the privileged helper. It trusts nothing it is
-// given: the entries file must hold only loopback addresses and .internal
-// hostnames, and the target is always the system hosts file.
+// given: the entries, read from standard input or from a regular file (see
+// runPrivilegedEntries), must hold only leased loopback addresses and
+// doktunnel .internal hostnames, errors never echo them, and the target is
+// always the system hosts file. Everything is validated before the hosts
+// file is written, since hosts.Write truncates it first.
 func runHostsPrivilegedApply(env *Env, entriesFile string, clean bool) error {
 	ctx := context.Background()
 	path := env.privilegedHostsPath()
@@ -465,13 +507,17 @@ func runHostsPrivilegedApply(env *Env, entriesFile string, clean bool) error {
 		return nil
 	}
 
-	raw, err := os.ReadFile(entriesFile)
-	if err != nil {
-		return clierr.Newf(clierr.InvalidArgument, "reading entries: %v", err)
+	var entries []hosts.Entry
+	var err error
+	source := entriesFile
+	if entriesFile == entriesStdin {
+		source = "standard input"
+		entries, err = hosts.ReadEntries(env.Stdin)
+	} else {
+		entries, err = hosts.ReadEntriesFile(entriesFile)
 	}
-	entries, err := hosts.ParseEntries(raw)
 	if err != nil {
-		return clierr.Newf(clierr.InvalidArgument, "%s: %v", entriesFile, err)
+		return clierr.Newf(clierr.InvalidArgument, "%s: %v", source, err)
 	}
 	content, f, _, err := readHosts(path)
 	if err != nil {

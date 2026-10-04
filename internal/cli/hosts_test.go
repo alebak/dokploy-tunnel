@@ -4,10 +4,12 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"io"
 	"io/fs"
 	"net/netip"
 	"os"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"strings"
 	"testing"
@@ -30,13 +32,28 @@ const fakeExe = "/opt/doktunnel/bin/doktunnel"
 type fakeElevator struct {
 	h     *hostsHarness
 	calls [][]string
+	// stdins holds what each call passed on standard input.
+	stdins []string
+	// noStdin makes it behave like UAC, which cannot pass standard input.
+	noStdin bool
 	// fail makes Run fail without running the helper, like a wrong
 	// password or a declined UAC prompt.
 	fail bool
 }
 
-func (f *fakeElevator) Run(_ context.Context, argv []string) error {
+func (f *fakeElevator) Run(_ context.Context, argv []string, stdin io.Reader) error {
 	f.calls = append(f.calls, argv)
+	var in []byte
+	if stdin != nil {
+		if f.noStdin {
+			return fmt.Errorf("this elevator cannot pass standard input")
+		}
+		var err error
+		if in, err = io.ReadAll(stdin); err != nil {
+			return err
+		}
+	}
+	f.stdins = append(f.stdins, string(in))
 	if f.fail {
 		return fmt.Errorf("sudo: 3 incorrect password attempts")
 	}
@@ -47,15 +64,21 @@ func (f *fakeElevator) Run(_ context.Context, argv []string) error {
 	if argv[0] != fakeExe {
 		return fmt.Errorf("unexpected executable %q", argv[0])
 	}
-	r := f.h.runAs(true, false, argv[1:]...)
+	r := f.h.runWithStdin(true, false, string(in), argv[1:]...)
 	if r.exit != 0 {
 		return fmt.Errorf("helper exited with %d: %s", r.exit, r.stderr)
 	}
 	return nil
 }
 
-func (f *fakeElevator) Command(argv []string) string {
-	return "fake-sudo " + strings.Join(argv, " ")
+func (f *fakeElevator) PipesStdin() bool { return !f.noStdin }
+
+func (f *fakeElevator) Command(argv []string, stdinFile string) string {
+	s := "fake-sudo " + strings.Join(argv, " ")
+	if stdinFile != "" {
+		s += " < " + stdinFile
+	}
+	return s
 }
 
 // fakeLoopback is a lo0 that starts with the given aliases missing.
@@ -122,10 +145,15 @@ func (h *hostsHarness) run(terminal bool, args ...string) result {
 
 func (h *hostsHarness) runAs(privileged, terminal bool, args ...string) result {
 	h.t.Helper()
+	return h.runWithStdin(privileged, terminal, "", args...)
+}
+
+func (h *hostsHarness) runWithStdin(privileged, terminal bool, stdin string, args ...string) result {
+	h.t.Helper()
 	var stdout, stderr bytes.Buffer
 	app := &App{
 		Root:            NewRoot(),
-		Stdin:           strings.NewReader(""),
+		Stdin:           strings.NewReader(stdin),
 		Stdout:          &stdout,
 		Stderr:          &stderr,
 		StdinIsTerminal: terminal,
@@ -187,6 +215,9 @@ func (h *hostsHarness) leaseFixture() {
 	h.lease("redis_cache", hostname.Names{Context: "prod", Organization: "Acme", Project: "shop", Service: "cache"})
 }
 
+// fixtureEntries is what the privileged helper receives for leaseFixture.
+const fixtureEntries = "127.77.0.1\tpostgres.myapp.shop.acme.prod.internal\n127.77.0.2\tcache.shop.acme.prod.internal\n"
+
 const fixtureBlock = hosts.BeginLine + "\r\n" +
 	"127.77.0.1\tpostgres.myapp.shop.acme.prod.internal\r\n" +
 	"127.77.0.2\tcache.shop.acme.prod.internal\r\n" +
@@ -224,15 +255,19 @@ func TestHostsSync_ElevatesOnlyThePrivilegedStep(t *testing.T) {
 	if r.exit != 0 {
 		t.Fatalf("exit = %d (stderr %q)", r.exit, r.stderr)
 	}
-	want := [][]string{{fakeExe, "hosts", "privileged-apply", "--entries-file", h.pendingPath()}}
+	// The entries travel on stdin: root never opens a path the caller chose.
+	want := [][]string{{fakeExe, "hosts", "privileged-apply", "--entries-file", "-"}}
 	if !slices.EqualFunc(h.elevator.calls, want, slices.Equal) {
 		t.Fatalf("elevator calls = %q, want %q", h.elevator.calls, want)
+	}
+	if want := []string{fixtureEntries}; !slices.Equal(h.elevator.stdins, want) {
+		t.Errorf("helper stdin = %q, want %q", h.elevator.stdins, want)
 	}
 	if got := h.readHosts(); got != fixtureHosts+fixtureBlock {
 		t.Errorf("hosts file =\n%q", got)
 	}
 	if _, err := os.Stat(h.pendingPath()); !os.IsNotExist(err) {
-		t.Errorf("pending entries file left behind after a successful sync: %v", err)
+		t.Errorf("pending entries file written although stdin carries the entries: %v", err)
 	}
 	if !strings.Contains(r.stderr, "administrator privileges") {
 		t.Errorf("stderr = %q, want a note before elevating", r.stderr)
@@ -272,7 +307,8 @@ func TestHostsSync_NoInputReturnsElevationRequired(t *testing.T) {
 				t.Fatalf("exit = %d, want %d (stdout %q)", r.exit, clierr.ElevationRequired.ExitCode(), r.stdout)
 			}
 			e := decodeError(t, r.stdout)
-			wantCmd := "fake-sudo " + fakeExe + " hosts privileged-apply --entries-file " + h.pendingPath()
+			// The user's own shell, not root, opens the pending file.
+			wantCmd := "fake-sudo " + fakeExe + " hosts privileged-apply --entries-file - < " + h.pendingPath()
 			if e.Code != clierr.ElevationRequired || !strings.Contains(e.Hint, wantCmd) {
 				t.Errorf("error = %+v, want elevation_required with hint containing %q", e, wantCmd)
 			}
@@ -286,13 +322,12 @@ func TestHostsSync_NoInputReturnsElevationRequired(t *testing.T) {
 			if err != nil {
 				t.Fatalf("pending entries file: %v", err)
 			}
-			wantPending := "127.77.0.1\tpostgres.myapp.shop.acme.prod.internal\n127.77.0.2\tcache.shop.acme.prod.internal\n"
-			if string(pending) != wantPending {
-				t.Errorf("pending entries = %q, want %q", pending, wantPending)
+			if string(pending) != fixtureEntries {
+				t.Errorf("pending entries = %q, want %q", pending, fixtureEntries)
 			}
 
 			// Running the hinted command applies exactly the pending change.
-			if r := h.runAs(true, false, "hosts", "privileged-apply", "--entries-file", h.pendingPath()); r.exit != 0 {
+			if r := h.runWithStdin(true, false, string(pending), "hosts", "privileged-apply", "--entries-file", "-"); r.exit != 0 {
 				t.Fatalf("privileged-apply exit = %d (stderr %q)", r.exit, r.stderr)
 			}
 			if got := h.readHosts(); got != fixtureHosts+fixtureBlock {
@@ -530,21 +565,75 @@ func TestHostsClean(t *testing.T) {
 	}
 }
 
-func TestHostsPrivilegedApply_RejectsInvalidEntries(t *testing.T) {
+func TestHostsSync_ElevatesThroughAFileWhenStdinCannotBePiped(t *testing.T) {
 	h := newHostsHarness(t)
-	bad := filepath.Join(t.TempDir(), "entries")
-	if err := os.WriteFile(bad, []byte("10.0.0.1\tevil.example.com\n"), 0o600); err != nil {
+	h.leaseFixture()
+	h.denyWrite = true
+	h.elevator.noStdin = true // UAC
+
+	r := h.run(true, "hosts", "sync")
+	if r.exit != 0 {
+		t.Fatalf("exit = %d (stderr %q)", r.exit, r.stderr)
+	}
+	want := [][]string{{fakeExe, "hosts", "privileged-apply", "--entries-file", h.pendingPath()}}
+	if !slices.EqualFunc(h.elevator.calls, want, slices.Equal) {
+		t.Fatalf("elevator calls = %q, want %q", h.elevator.calls, want)
+	}
+	if got := h.readHosts(); got != fixtureHosts+fixtureBlock {
+		t.Errorf("hosts file =\n%q", got)
+	}
+	if _, err := os.Stat(h.pendingPath()); !os.IsNotExist(err) {
+		t.Errorf("pending entries file left behind after a successful sync: %v", err)
+	}
+}
+
+func TestHostsPrivilegedApply_RejectsInvalidEntries(t *testing.T) {
+	const secret = "10.0.0.1\tevil.example.com\n"
+	dir := t.TempDir()
+	badFile := filepath.Join(dir, "entries")
+	if err := os.WriteFile(badFile, []byte(secret), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	r := h.runAs(true, false, "hosts", "privileged-apply", "--entries-file", bad)
-	if r.exit == 0 {
-		t.Fatal("privileged-apply accepted entries outside loopback and .internal")
+	tests := []struct {
+		name  string
+		stdin string
+		args  []string
+	}{
+		{name: "invalid entries on stdin", stdin: secret, args: []string{"--entries-file", "-"}},
+		{name: "invalid entries in a file", args: []string{"--entries-file", badFile}},
+		{name: "oversized stdin", stdin: strings.Repeat("\n", 4<<20+1), args: []string{"--entries-file", "-"}},
+		{name: "a directory", args: []string{"--entries-file", dir}},
+		{name: "no input", args: nil},
 	}
-	if h.readHosts() != fixtureHosts {
-		t.Error("hosts file changed")
+	if runtime.GOOS != "windows" {
+		valid := filepath.Join(dir, "valid")
+		if err := os.WriteFile(valid, []byte(fixtureEntries), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		link := filepath.Join(dir, "link")
+		if err := os.Symlink(valid, link); err != nil {
+			t.Fatal(err)
+		}
+		tests = append(tests, struct {
+			name  string
+			stdin string
+			args  []string
+		}{name: "a symlink to valid entries", args: []string{"--entries-file", link}})
 	}
-	if r := h.runAs(true, false, "hosts", "privileged-apply"); r.exit != clierr.InvalidArgument.ExitCode() {
-		t.Errorf("privileged-apply without input: exit = %d", r.exit)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			h := newHostsHarness(t)
+			r := h.runWithStdin(true, false, tt.stdin, append([]string{"hosts", "privileged-apply"}, tt.args...)...)
+			if r.exit != clierr.InvalidArgument.ExitCode() {
+				t.Errorf("exit = %d, want %d (stderr %q)", r.exit, clierr.InvalidArgument.ExitCode(), r.stderr)
+			}
+			if out := r.stdout + r.stderr; strings.Contains(out, "evil") || strings.Contains(out, "10.0.0.1") {
+				t.Errorf("output echoes the rejected entries: %q", out)
+			}
+			if h.readHosts() != fixtureHosts {
+				t.Error("hosts file changed")
+			}
+		})
 	}
 }
 

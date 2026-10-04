@@ -1,6 +1,7 @@
 package hosts
 
 import (
+	"bytes"
 	"errors"
 	"net/netip"
 	"os"
@@ -272,14 +273,18 @@ func TestParseEntries_ValidatesHelperInput(t *testing.T) {
 	}
 
 	bad := map[string]string{
-		"not loopback":       "10.0.0.5\tdb.p.o.c.internal\n",
-		"IPv6":               "::1\tdb.p.o.c.internal\n",
-		"not .internal":      "127.77.0.1\tdb.example.com\n",
-		"unsafe hostname":    "127.77.0.1\tDB;rm.p.o.c.internal\n",
-		"two names per line": "127.77.0.1\ta.p.o.c.internal b.p.o.c.internal\n",
-		"duplicate hostname": "127.77.0.1\ta.p.o.c.internal\n127.77.0.2\ta.p.o.c.internal\n",
-		"marker smuggled in": EndLine + "\n",
-		"too large":          strings.Repeat("127.77.0.1\ta.p.o.c.internal\n", maxEntriesSize/20),
+		"not loopback":            "10.0.0.5\tdb.p.o.c.internal\n",
+		"IPv6":                    "::1\tdb.p.o.c.internal\n",
+		"not .internal":           "127.77.0.1\tdb.example.com\n",
+		"unsafe hostname":         "127.77.0.1\tDB;rm.p.o.c.internal\n",
+		"two names per line":      "127.77.0.1\ta.p.o.c.internal b.p.o.c.internal\n",
+		"duplicate hostname":      "127.77.0.1\ta.p.o.c.internal\n127.77.0.2\ta.p.o.c.internal\n",
+		"marker smuggled in":      EndLine + "\n",
+		"outside the lease range": "127.0.0.5\tdb.p.o.c.internal\n",
+		"docker host alias":       "127.0.0.1\thost.docker.internal\n",
+		"cloud metadata name":     "127.77.0.1\tmetadata.google.internal\n",
+		"too few labels":          "127.77.0.1\to.p.c.internal\n",
+		"too large":               strings.Repeat("127.77.0.1\ta.p.o.c.internal\n", maxEntriesSize/20),
 	}
 	for name, content := range bad {
 		t.Run(name, func(t *testing.T) {
@@ -400,4 +405,128 @@ func nativeEOL() string {
 		return "\r\n"
 	}
 	return "\n"
+}
+
+// The helper may be pointed at any file root can read, so its errors must
+// never echo what the file holds.
+func TestParseEntries_ErrorsDoNotEchoContent(t *testing.T) {
+	tests := []struct {
+		content  string
+		wantLine string
+		secrets  []string
+	}{
+		{content: "root:$y$j9T$secret:19000:0:99999:7:::\n", wantLine: "line 1", secrets: []string{"root", "secret"}},
+		{content: "127.77.0.1\tok.p.o.c.internal\nhunter2 db.p.o.c.internal\n", wantLine: "line 2", secrets: []string{"hunter2"}},
+		{content: "127.77.0.1\thunter2.example.com\n", wantLine: "line 1", secrets: []string{"hunter2"}},
+		{content: "10.9.8.7\tdb.p.o.c.internal\n", wantLine: "line 1", secrets: []string{"10.9.8.7"}},
+		{content: "127.77.0.1\thunter2.p.o.c.internal\n127.77.0.2\thunter2.p.o.c.internal\n", wantLine: "line 2", secrets: []string{"hunter2"}},
+	}
+	for _, tt := range tests {
+		_, err := ParseEntries([]byte(tt.content))
+		if err == nil {
+			t.Errorf("ParseEntries accepted %q", tt.content)
+			continue
+		}
+		if !strings.Contains(err.Error(), tt.wantLine) {
+			t.Errorf("error %q does not name %s", err, tt.wantLine)
+		}
+		for _, s := range tt.secrets {
+			if strings.Contains(err.Error(), s) {
+				t.Errorf("error %q echoes %q from the input", err, s)
+			}
+		}
+	}
+}
+
+// countingReader is an endless stream of zeros that counts what is read.
+type countingReader struct{ n int }
+
+func (r *countingReader) Read(p []byte) (int, error) {
+	clear(p)
+	r.n += len(p)
+	return len(p), nil
+}
+
+func TestReadEntries_BoundsTheRead(t *testing.T) {
+	got, err := ReadEntries(strings.NewReader("127.77.0.1\tdb.p.o.c.internal\n"))
+	if err != nil || len(got) != 1 {
+		t.Fatalf("ReadEntries(valid) = %v, %v", got, err)
+	}
+	r := &countingReader{}
+	if _, err := ReadEntries(r); !errors.Is(err, ErrMalformed) {
+		t.Errorf("ReadEntries(endless) error = %v, want ErrMalformed", err)
+	}
+	if r.n > maxEntriesSize+4096 {
+		t.Errorf("read %d bytes from an endless stream, want about %d", r.n, maxEntriesSize+1)
+	}
+}
+
+func TestReadEntriesFile_RefusesAnythingButARegularFile(t *testing.T) {
+	dir := t.TempDir()
+	valid := filepath.Join(dir, "pending-hosts")
+	if err := os.WriteFile(valid, []byte("127.77.0.1\tdb.p.o.c.internal\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := ReadEntriesFile(valid); err != nil || len(got) != 1 {
+		t.Fatalf("ReadEntriesFile(valid) = %v, %v", got, err)
+	}
+
+	oversized := filepath.Join(dir, "oversized")
+	if err := os.WriteFile(oversized, bytes.Repeat([]byte("\n"), maxEntriesSize+1), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	bad := map[string]string{"directory": dir, "oversized": oversized}
+	if runtime.GOOS != "windows" {
+		link := filepath.Join(dir, "link")
+		if err := os.Symlink(valid, link); err != nil {
+			t.Fatal(err)
+		}
+		bad["symlink to a valid file"] = link
+		if _, err := os.Stat("/dev/zero"); err == nil {
+			bad["device"] = "/dev/zero"
+		}
+	}
+	for name, path := range bad {
+		t.Run(name, func(t *testing.T) {
+			if got, err := ReadEntriesFile(path); err == nil {
+				t.Errorf("ReadEntriesFile(%s) = %v, want an error", path, got)
+			}
+		})
+	}
+}
+
+// The hosts file is rewritten in place, so its inode, SELinux label,
+// extended attributes and Windows ACL survive.
+func TestWrite_KeepsTheSameFile(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "hosts")
+	if err := os.WriteFile(path, []byte(unrelated), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	before, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := Write(path, []byte("new\n")); err != nil {
+		t.Fatalf("Write: %v", err)
+	}
+	after, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !os.SameFile(before, after) {
+		t.Error("Write replaced the hosts file instead of rewriting it in place")
+	}
+	if got, _ := os.ReadFile(path); string(got) != "new\n" {
+		t.Errorf("file = %q, want %q", got, "new\n")
+	}
+}
+
+func TestWrite_CreatesAMissingFile(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "hosts")
+	if err := Write(path, []byte("new\n")); err != nil {
+		t.Fatalf("Write: %v", err)
+	}
+	if got, _ := os.ReadFile(path); string(got) != "new\n" {
+		t.Errorf("file = %q, want %q", got, "new\n")
+	}
 }
