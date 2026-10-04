@@ -275,6 +275,15 @@ Invalid keys, keys of another organization, services the key cannot read, and se
 - Merging that pull request tags the release; [GoReleaser](https://goreleaser.com) then builds both binaries and attaches the archives and `checksums.txt` to the GitHub release.
 - Before 1.0.0, breaking changes bump the minor version.
 
+## Platform verification
+
+The `platform` workflow (`.github/workflows/platform.yml`) checks on GitHub's Linux, macOS and Windows runners what unit tests can only fake:
+
+- **Loopback addresses:** listeners on addresses in `127.77.0.0/16` bind and accept connections natively on Linux and Windows, and on macOS only after `ifconfig lo0 alias <ip> up` (the probe adds and removes the aliases).
+- **Hosts file round trip:** the real `doktunnel` binary runs `hosts sync` against the runner's hosts file with real privileges (sudo on Linux and macOS, on a pseudo-terminal as a person would; on Windows the runner is already an elevated Administrator, so the file is written directly), the entries resolve through `getent`, `dscacheutil` or `Resolve-DnsName` and accept connections by name, and `hosts clean` leaves the unrelated lines around the block byte for byte. On Windows it also runs the privileged helper through a real UAC elevation (`Start-Process -Verb RunAs`) to check that it completes unattended.
+
+A disproved assumption shows up as a *Platform finding* warning on the run and in its job summary. These tests live in `internal/platformtest`, need the `platform` build tag, and skip unless `DOKTUNNEL_PLATFORM_TESTS=1` is set on GitHub Actions: they run sudo and rewrite the system hosts file, so never run them on your own machine.
+
 ## Contributing
 
 See [CONTRIBUTING.md](CONTRIBUTING.md).
