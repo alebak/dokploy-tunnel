@@ -12,6 +12,7 @@ import (
 	"os"
 	"os/signal"
 	"syscall"
+	"time"
 
 	"github.com/alebak/dokploy-tunnel/internal/companion"
 	"github.com/alebak/dokploy-tunnel/internal/version"
@@ -37,11 +38,22 @@ func main() {
 	log.Info("starting", "version", version.String(binaryName))
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
-	// Forwarding through Docker is not implemented yet: every authorized
-	// tunnel is refused with target_unreachable.
-	if err := companion.Run(ctx, cfg, companion.UnavailableBridge{}, log); err != nil {
+	if err := run(ctx, cfg, log); err != nil {
 		log.Error("companion failed", "error", err)
 		stop()
 		os.Exit(1)
 	}
+}
+
+// run serves the companion with the bridge cfg selects until ctx is done,
+// then removes the repeaters it started.
+func run(ctx context.Context, cfg companion.Config, log *slog.Logger) error {
+	bridge, closeBridge, err := companion.NewBridge(ctx, cfg, log)
+	if err != nil {
+		return err
+	}
+	errRun := companion.Run(ctx, cfg, bridge, log)
+	closeCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	return errors.Join(errRun, closeBridge(closeCtx))
 }

@@ -24,7 +24,8 @@ type Exec struct {
 
 // Exec runs cmd in the running container id with stdin, stdout and stderr
 // attached and no TTY, and returns its stream. Stderr is copied to stderr
-// as it is read along with stdout; it must not block. ctx bounds starting
+// as it is read along with stdout; it must not block, and may be nil to
+// discard it. ctx bounds starting
 // the command only.
 func (c *Client) Exec(ctx context.Context, id string, cmd []string, stderr io.Writer) (*Exec, error) {
 	create := map[string]any{
@@ -100,10 +101,19 @@ func handshake(conn net.Conn, req *http.Request) (net.Conn, *bufio.Reader, error
 	return conn, nil, checkResponse(resp)
 }
 
-// Read reads the command's stdout. It returns io.EOF when the command has
-// exited and its output is drained.
+// Read reads the command's stdout, copying stderr to the writer given to
+// Exec. It returns io.EOF when the command has exited and its output is
+// drained.
 func (e *Exec) Read(p []byte) (int, error) {
 	return e.out.Read(p)
+}
+
+// ReadStream reads the next chunk of stdout or stderr into p, and reports
+// which it was; stderr is not copied to the writer given to Exec. It lets
+// a caller watch stderr without blocking on stdout. Reads and ReadStream
+// calls must not run concurrently.
+func (e *Exec) ReadStream(p []byte) (n int, isStderr bool, err error) {
+	return e.out.next(p)
 }
 
 // Write writes to the command's stdin.
@@ -151,48 +161,67 @@ type demux struct {
 }
 
 func (d *demux) Read(p []byte) (int, error) {
+	if len(p) == 0 {
+		return 0, nil
+	}
 	for {
-		if d.remaining == 0 {
-			if _, err := io.ReadFull(d.r, d.header[:]); err != nil {
+		n, isStderr, err := d.next(p)
+		if isStderr {
+			if d.stderr != nil {
+				if _, werr := d.stderr.Write(p[:n]); werr != nil && err == nil {
+					err = werr
+				}
+			}
+			if err != nil {
 				return 0, err
 			}
-			d.stream = d.header[0]
-			d.remaining = int64(binary.BigEndian.Uint32(d.header[4:]))
-			if d.stream > streamStderr {
-				return 0, fmt.Errorf("%w: stream type %d", errBadFrame, d.stream)
-			}
 			continue
 		}
-		if d.stream != streamStdout {
-			sink := io.Discard
-			if d.stream == streamStderr && d.stderr != nil {
-				sink = d.stderr
-			}
-			n, err := io.CopyN(sink, d.r, d.remaining)
-			d.remaining -= n
+		if n > 0 || err != nil {
+			return n, err
+		}
+	}
+}
+
+// next reads up to len(p) bytes of the current stdout or stderr frame,
+// starting the next frame when the current one is done. Stdin frames,
+// which daemons never send, are skipped.
+func (d *demux) next(p []byte) (n int, isStderr bool, err error) {
+	for d.remaining == 0 || d.stream == streamStdin {
+		if d.remaining > 0 {
+			skipped, err := io.CopyN(io.Discard, d.r, d.remaining)
+			d.remaining -= skipped
 			if err != nil {
-				return 0, unexpectedEOF(err)
+				return 0, false, unexpectedEOF(err)
 			}
 			continue
 		}
-		if len(p) == 0 {
-			return 0, nil
+		if _, err := io.ReadFull(d.r, d.header[:]); err != nil {
+			return 0, false, err
 		}
-		if int64(len(p)) > d.remaining {
-			p = p[:d.remaining]
+		d.stream = d.header[0]
+		d.remaining = int64(binary.BigEndian.Uint32(d.header[4:]))
+		if d.stream > streamStderr {
+			return 0, false, fmt.Errorf("%w: stream type %d", errBadFrame, d.stream)
 		}
-		n, err := d.r.Read(p)
-		d.remaining -= int64(n)
-		if err == io.EOF && d.remaining > 0 {
+	}
+	if len(p) == 0 {
+		return 0, d.stream == streamStderr, nil
+	}
+	if int64(len(p)) > d.remaining {
+		p = p[:d.remaining]
+	}
+	n, err = d.r.Read(p)
+	d.remaining -= int64(n)
+	if err == io.EOF {
+		// A complete frame reports EOF on the next call, if the stream
+		// really ends there.
+		err = nil
+		if d.remaining > 0 {
 			err = io.ErrUnexpectedEOF
 		}
-		if err == io.EOF {
-			// The frame is complete; report EOF on the next call, if the
-			// stream really ends there.
-			err = nil
-		}
-		return n, err
 	}
+	return n, d.stream == streamStderr, err
 }
 
 // unexpectedEOF reports an EOF inside a frame as io.ErrUnexpectedEOF.
