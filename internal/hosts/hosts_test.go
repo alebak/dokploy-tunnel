@@ -62,7 +62,8 @@ func TestWithEntries(t *testing.T) {
 			name:    "missing final newline is completed before the block",
 			content: "127.0.0.1 localhost",
 			entries: pg[:1],
-			want:    "127.0.0.1 localhost\n" + block("\n", "127.77.0.1\tpostgres.myapp.shop.acme.prod.internal"),
+			// No line ending to preserve, so the OS default is used.
+			want: "127.0.0.1 localhost" + nativeEOL() + block(nativeEOL(), "127.77.0.1\tpostgres.myapp.shop.acme.prod.internal"),
 		},
 		{
 			name:    "existing block is replaced in place",
@@ -390,4 +391,13 @@ func equalEntries(a, b []Entry) bool {
 		}
 	}
 	return true
+}
+
+// nativeEOL is the line ending doktunnel uses for a hosts file that has none
+// yet: CRLF on Windows, LF elsewhere.
+func nativeEOL() string {
+	if runtime.GOOS == "windows" {
+		return "\r\n"
+	}
+	return "\n"
 }
