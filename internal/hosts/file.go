@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"io/fs"
 	"os"
-	"path/filepath"
 	"runtime"
 )
 
@@ -46,52 +45,28 @@ func IsPermission(err error) bool {
 	return errors.Is(err, fs.ErrPermission)
 }
 
-// Write replaces the hosts file at path with data, keeping its permissions.
+// Write replaces the contents of the hosts file at path with data, keeping
+// its permissions. A symbolic link at path is followed, so the link itself
+// survives; a missing file is created.
 //
-// The new contents go to a temporary file in the same directory that is then
-// renamed over the old one, so readers see either the old or the new file.
-// When the rename is impossible, as for a hosts file bind-mounted into a
-// container or held open on Windows, the file is rewritten in place. A
-// symbolic link at path is followed, so the link itself survives.
+// The file is rewritten in place: opened for writing, truncated, written and
+// synced. A temporary file renamed over it would be atomic, but would be a
+// new file without the SELinux label, extended attributes and Windows ACL of
+// the system hosts file, so Write does what most tools that edit the hosts
+// file do. The trade-off is that the write is not atomic: a reader may see a
+// truncated file for a moment, and an I/O error midway leaves it truncated.
+// Callers therefore compute and validate data completely before calling
+// Write, so no validation error can happen after the file is truncated.
 func Write(path string, data []byte) error {
-	real, err := filepath.EvalSymlinks(path)
-	switch {
-	case err == nil:
-		path = real
-	case !errors.Is(err, fs.ErrNotExist):
-		return fmt.Errorf("resolving hosts file: %w", err)
-	}
-	mode := fs.FileMode(0o644)
-	if info, err := os.Stat(path); err == nil {
-		mode = info.Mode().Perm()
-	}
-
-	tmp, err := os.CreateTemp(filepath.Dir(path), "."+filepath.Base(path)+".tmp*")
+	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o644)
 	if err != nil {
-		// The directory may be read-only while the file is writable.
-		return writeInPlace(path, data, mode)
+		return fmt.Errorf("writing hosts file: %w", err)
 	}
-	defer os.Remove(tmp.Name()) // no-op after a successful rename
-	if err := writeTemp(tmp, data, mode); err != nil {
-		return err
-	}
-	if err := os.Rename(tmp.Name(), path); err != nil {
-		if ierr := writeInPlace(path, data, mode); ierr != nil {
-			return errors.Join(fmt.Errorf("replacing hosts file: %w", err), ierr)
-		}
-	}
-	return nil
-}
-
-func writeTemp(tmp *os.File, data []byte, mode fs.FileMode) error {
-	_, err := tmp.Write(data)
+	_, err = f.Write(data)
 	if err == nil {
-		err = tmp.Chmod(mode)
+		err = f.Sync()
 	}
-	if err == nil {
-		err = tmp.Sync()
-	}
-	if cerr := tmp.Close(); err == nil {
+	if cerr := f.Close(); err == nil {
 		err = cerr
 	}
 	if err != nil {
@@ -100,9 +75,36 @@ func writeTemp(tmp *os.File, data []byte, mode fs.FileMode) error {
 	return nil
 }
 
-func writeInPlace(path string, data []byte, mode fs.FileMode) error {
-	if err := os.WriteFile(path, data, mode); err != nil {
-		return fmt.Errorf("writing hosts file: %w", err)
+// ReadEntriesFile reads and validates the entries in the file at path.
+//
+// The privileged helper reads its entries from standard input wherever it
+// can: sudo passes stdin through and prompts on the terminal, so root never
+// opens a path its caller chose. A UAC prompt cannot pass a standard input
+// to the elevated process, so on Windows the entries travel in a file in the
+// user's own state directory instead, and the helper, running as
+// Administrator, must not be turned against other files: a symbolic link,
+// device or any other non-regular file is refused, the file must still be
+// the one checked when it is opened, and at most maxEntriesSize+1 bytes are
+// read. ParseEntries never echoes what it read.
+func ReadEntriesFile(path string) ([]Entry, error) {
+	checked, err := os.Lstat(path)
+	if err != nil {
+		return nil, fmt.Errorf("reading entries: %w", err)
 	}
-	return nil
+	if !checked.Mode().IsRegular() {
+		return nil, fmt.Errorf("%w: %s is not a regular file", ErrMalformed, path)
+	}
+	f, err := openNoFollow(path)
+	if err != nil {
+		return nil, fmt.Errorf("reading entries: %w", err)
+	}
+	defer f.Close()
+	opened, err := f.Stat()
+	if err != nil {
+		return nil, fmt.Errorf("reading entries: %w", err)
+	}
+	if !opened.Mode().IsRegular() || !os.SameFile(checked, opened) {
+		return nil, fmt.Errorf("%w: %s changed while it was opened", ErrMalformed, path)
+	}
+	return ReadEntries(f)
 }

@@ -12,6 +12,7 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
+	"io"
 	"net/netip"
 	"runtime"
 	"slices"
@@ -36,6 +37,10 @@ const (
 // maxEntriesSize bounds the entries ParseEntries accepts; the full
 // 127.77.0.0/16 range with long hostnames stays well below it in practice.
 const maxEntriesSize = 4 << 20
+
+// minLabels is the fewest labels a doktunnel hostname has:
+// <service>.<project>.<org>.<context>.internal.
+const minLabels = 5
 
 // ErrMalformed is wrapped by every error about a hosts file or entry list
 // that doktunnel refuses to merge.
@@ -242,9 +247,14 @@ func FormatEntries(entries []Entry) []byte {
 }
 
 // ParseEntries reads entries written by FormatEntries and validates them
-// strictly: each line holds one IPv4 loopback address and one .internal
-// hostname, and no hostname repeats. The privileged helper uses it, so
-// nothing else can reach the hosts file through it.
+// strictly: each line holds one address in registry.DefaultRange and one
+// .internal hostname of at least minLabels labels, and no hostname repeats.
+// The privileged helper uses it, so nothing else can reach the hosts file
+// through it: not the 127.0.0.1 names other tools rely on, such as
+// host.docker.internal, nor short names such as metadata.google.internal.
+//
+// Errors name the line, never its contents: the helper runs as root, and
+// whatever it was handed must not leak back through its error messages.
 func ParseEntries(content []byte) ([]Entry, error) {
 	if len(content) > maxEntriesSize {
 		return nil, fmt.Errorf("%w: entry list exceeds %d bytes", ErrMalformed, maxEntriesSize)
@@ -263,19 +273,31 @@ func ParseEntries(content []byte) ([]Entry, error) {
 			return nil, bad("want exactly one address and one hostname")
 		}
 		ip, err := netip.ParseAddr(fields[0])
-		if err != nil || !ip.Is4() || !ip.IsLoopback() {
-			return nil, bad(fmt.Sprintf("%q is not an IPv4 loopback address", fields[0]))
+		if err != nil || !registry.DefaultRange.Contains(ip) {
+			return nil, bad(fmt.Sprintf("the address is not in %v", registry.DefaultRange))
 		}
-		if !hostname.Valid(fields[1]) {
-			return nil, bad(fmt.Sprintf("%q is not a valid .%s hostname", fields[1], hostname.TLD))
+		host := fields[1]
+		if !hostname.Valid(host) || strings.Count(host, ".")+1 < minLabels {
+			return nil, bad(fmt.Sprintf("the hostname is not a doktunnel .%s hostname", hostname.TLD))
 		}
-		if seen[fields[1]] {
-			return nil, bad(fmt.Sprintf("hostname %q repeats", fields[1]))
+		if seen[host] {
+			return nil, bad("the hostname repeats an earlier line")
 		}
-		seen[fields[1]] = true
-		out = append(out, Entry{IP: ip, Hostname: fields[1]})
+		seen[host] = true
+		out = append(out, Entry{IP: ip, Hostname: host})
 	}
 	return out, nil
+}
+
+// ReadEntries reads and validates entries from r, reading at most one byte
+// more than ParseEntries accepts, so an endless stream is refused rather
+// than exhausting memory.
+func ReadEntries(r io.Reader) ([]Entry, error) {
+	b, err := io.ReadAll(io.LimitReader(r, maxEntriesSize+1))
+	if err != nil {
+		return nil, fmt.Errorf("reading entries: %w", err)
+	}
+	return ParseEntries(b)
 }
 
 type marker int

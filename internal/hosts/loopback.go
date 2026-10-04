@@ -50,6 +50,10 @@ func (noLoopback) Missing(context.Context, []netip.Addr) ([]netip.Addr, error) {
 
 func (noLoopback) Add(context.Context, []netip.Addr) error { return nil }
 
+// ifconfigPath is macOS's ifconfig. The privileged helper runs it as root,
+// and sudo on macOS keeps the caller's PATH, so it is never looked up there.
+const ifconfigPath = "/sbin/ifconfig"
+
 // ifconfigLoopback manages lo0 aliases with ifconfig, as macOS needs.
 type ifconfigLoopback struct {
 	run Runner
@@ -59,7 +63,7 @@ func (l ifconfigLoopback) Missing(ctx context.Context, ips []netip.Addr) ([]neti
 	if len(ips) == 0 {
 		return nil, nil
 	}
-	out, err := l.run(ctx, "ifconfig", "lo0")
+	out, err := l.run(ctx, ifconfigPath, "lo0")
 	if err != nil {
 		return nil, fmt.Errorf("reading lo0 addresses: %w: %s", err, strings.TrimSpace(string(out)))
 	}
@@ -83,7 +87,7 @@ func (l ifconfigLoopback) Missing(ctx context.Context, ips []netip.Addr) ([]neti
 
 func (l ifconfigLoopback) Add(ctx context.Context, ips []netip.Addr) error {
 	for _, ip := range ips {
-		if out, err := l.run(ctx, "ifconfig", "lo0", "alias", ip.String(), "up"); err != nil {
+		if out, err := l.run(ctx, ifconfigPath, "lo0", "alias", ip.String(), "up"); err != nil {
 			return fmt.Errorf("adding lo0 alias %s: %w: %s", ip, err, strings.TrimSpace(string(out)))
 		}
 	}

@@ -174,17 +174,19 @@ With `--json`, `hosts sync` prints `{"hosts_file","dry_run","changed","added","r
 {"hosts_file":"/etc/hosts","entries":[{"ip":"127.77.0.1","hostname":"postgres.myapp.shop.acme.prod.internal"}]}
 ```
 
-**Administrator privileges.** The hosts file belongs to root (Administrator on Windows), but doktunnel never runs as root: your API keys live in *your* OS keyring, and your config and address registry in *your* home directory, which a root process would not see. Instead, when the section must change, doktunnel re-runs only the privileged step, the same binary with an internal helper command that reads the new entries from a file in its state directory and accepts nothing but loopback addresses and `.internal` hostnames:
+**Administrator privileges.** The hosts file belongs to root (Administrator on Windows), but doktunnel never runs as root: your API keys live in *your* OS keyring, and your config and address registry in *your* home directory, which a root process would not see. Instead, when the section must change, doktunnel re-runs only the privileged step, the same binary with an internal helper command that accepts nothing but addresses in `127.77.0.0/16` and doktunnel's own `.internal` hostnames (at least five labels), and never echoes what it rejects:
 
-- **Linux and macOS:** through `sudo`, which asks for your password.
-- **macOS** also needs every address added to `lo0` (`ifconfig lo0 alias <ip> up`); the aliases are lost on reboot, so `hosts sync` checks them and re-adds missing ones in the same step.
-- **Windows:** through a UAC prompt (PowerShell `Start-Process -Verb RunAs`).
+- **Linux and macOS:** through `sudo`, which asks for your password on the terminal; the new entries reach the helper on its standard input, so root never opens a file you point it at.
+- **macOS** also needs every address added to `lo0` (`/sbin/ifconfig lo0 alias <ip> up`); the aliases are lost on reboot, so `hosts sync` checks them and re-adds missing ones in the same step.
+- **Windows:** through a UAC prompt (PowerShell `Start-Process -Verb RunAs`). UAC cannot pass a standard input, so the entries go in a file in your state directory, which the helper reads only if it is a regular file, not a link.
 
-When nothing changed, nothing is elevated. With `--no-input`, or when stdin is not a terminal, doktunnel never prompts: it fails with `elevation_required`, and the hint is the exact command to run yourself, for example:
+The hosts file is rewritten in place rather than replaced, so its SELinux label, extended attributes and Windows ACL are kept.
+
+When nothing changed, nothing is elevated. With `--no-input`, or when stdin is not a terminal, doktunnel never prompts: it fails with `elevation_required`, and the hint is the exact command to run yourself. The entries wait in a file in your state directory, which your own shell redirects into the helper, for example:
 
 ```text
 doktunnel: updating /etc/hosts needs administrator privileges, and prompting is not allowed [elevation_required]
-hint: run: sudo /usr/local/bin/doktunnel hosts privileged-apply --entries-file /home/me/.local/state/doktunnel/pending-hosts
+hint: run: sudo /usr/local/bin/doktunnel hosts privileged-apply --entries-file - < /home/me/.local/state/doktunnel/pending-hosts
 ```
 
 ### Global flags
