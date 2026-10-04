@@ -58,17 +58,22 @@ func closedAddr(t *testing.T) string {
 
 var postgresTarget = Target{Kind: KindCompose, AppName: "myapp", Service: "postgres", Port: 5432}
 
+// postgresIP is the address of compose service myapp/postgres on
+// myapp_default.
+const postgresIP = "172.20.0.5"
+
 // newTargetFake is a fake daemon running compose service myapp/postgres
-// on myapp_default, whose repeaters run socat that reaches addrs.
+// on myapp_default, whose repeaters run socat that reaches addrs, keyed by
+// the address socat dials.
 func newTargetFake(t *testing.T, addrs map[string]string) *dockertest.Fake {
 	t.Helper()
 	fake := newFake(t)
 	fake.AddImage(testImage)
 	fake.AddContainer(dockertest.Container{
-		ID: "pg1", Name: "myapp-postgres-1", Running: true,
-		Labels:       map[string]string{"com.docker.compose.project": "myapp", "com.docker.compose.service": "postgres"},
+		ID: "pg1", Name: "myapp-postgres-1", Running: true, Labels: composeLabels("myapp", "postgres"),
 		ExposedPorts: []string{"5432/tcp"},
 		Networks:     map[string][]string{"myapp_default": {"postgres", "myapp-postgres-1"}},
+		IPs:          map[string]string{"myapp_default": postgresIP},
 	})
 	fake.ExecHandler = dockertest.Socat(func(host string) (string, bool) {
 		addr, ok := addrs[host]
@@ -78,7 +83,7 @@ func newTargetFake(t *testing.T, addrs map[string]string) *dockertest.Fake {
 }
 
 func TestOpen_RoundTripWithHalfClose(t *testing.T) {
-	fake := newTargetFake(t, map[string]string{"postgres": upperServer(t)})
+	fake := newTargetFake(t, map[string]string{postgresIP: upperServer(t)})
 	r := newRepeater(t, fake, Options{})
 
 	s, err := r.Open(testContext(t), postgresTarget)
@@ -104,7 +109,8 @@ func TestOpen_RoundTripWithHalfClose(t *testing.T) {
 	if len(execs) != 1 {
 		t.Fatalf("%d execs, want 1", len(execs))
 	}
-	want := []string{"socat", "-d", "-d", "STDIO", "TCP:postgres:5432,connect-timeout=15"}
+	// socat dials the address the daemon reports, not a name.
+	want := []string{"socat", "-d", "-d", "STDIO", "TCP:" + postgresIP + ":5432,connect-timeout=15"}
 	if !slices.Equal(execs[0].Cmd, want) {
 		t.Errorf("exec cmd = %q, want %q", execs[0].Cmd, want)
 	}
@@ -135,7 +141,7 @@ func TestOpen_DataBeforeReadinessIsKept(t *testing.T) {
 }
 
 func TestOpen_ConcurrentStreamsShareTheRepeater(t *testing.T) {
-	fake := newTargetFake(t, map[string]string{"postgres": upperServer(t)})
+	fake := newTargetFake(t, map[string]string{postgresIP: upperServer(t)})
 	r := newRepeater(t, fake, Options{Grace: 20 * time.Millisecond})
 
 	var streams []io.ReadWriteCloser
@@ -181,8 +187,8 @@ func TestOpen_Failures(t *testing.T) {
 		wantErr error
 		detail  string
 	}{
-		{"connection refused", map[string]string{"postgres": closedAddr(t)}, postgresTarget, ErrTargetUnreachable, "Connection refused"},
-		{"name does not resolve", nil, postgresTarget, ErrTargetUnreachable, "does not resolve"},
+		{"connection refused", map[string]string{postgresIP: closedAddr(t)}, postgresTarget, ErrTargetUnreachable, "Connection refused"},
+		{"address unreachable", nil, postgresTarget, ErrTargetUnreachable, "socat"},
 		{"no such service", nil, Target{Kind: KindCompose, AppName: "myapp", Service: "redis", Port: 6379}, ErrTargetUnreachable, "no running container"},
 		{"invalid port", nil, Target{Kind: KindCompose, AppName: "myapp", Service: "postgres", Port: 70000}, ErrTargetUnreachable, "port"},
 	}
@@ -219,7 +225,7 @@ func TestOpen_TimesOutWaitingForSocat(t *testing.T) {
 }
 
 func TestOpen_ReplacesADeadRepeater(t *testing.T) {
-	fake := newTargetFake(t, map[string]string{"postgres": upperServer(t)})
+	fake := newTargetFake(t, map[string]string{postgresIP: upperServer(t)})
 	r := newRepeater(t, fake, Options{Grace: time.Hour})
 	s, err := r.Open(testContext(t), postgresTarget)
 	if err != nil {
@@ -250,12 +256,12 @@ func TestOpen_ReplacesADeadRepeater(t *testing.T) {
 func TestExposedPorts_IgnoresNetworks(t *testing.T) {
 	fake := newFake(t)
 	fake.AddContainer(dockertest.Container{
-		ID: "mq", Name: "myapp-rabbitmq-1", Running: true,
-		Labels:       map[string]string{"com.docker.compose.project": "myapp", "com.docker.compose.service": "rabbitmq"},
+		ID: "mq", Name: "myapp-rabbitmq-1", Running: true, Labels: composeLabels("myapp", "rabbitmq"),
 		ExposedPorts: []string{"15672/tcp", "5672/tcp", "4369/tcp"},
 		Networks:     map[string][]string{"closed-net": nil},
 	})
-	got, err := ExposedPorts(testContext(t), newClient(t, fake), Target{Kind: KindCompose, AppName: "myapp", Service: "rabbitmq"})
+	r := newRepeater(t, fake, Options{})
+	got, err := r.ExposedPorts(testContext(t), Target{Kind: KindCompose, AppName: "myapp", Service: "rabbitmq"})
 	if err != nil {
 		t.Fatalf("ExposedPorts: %v", err)
 	}

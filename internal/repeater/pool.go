@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -26,7 +27,18 @@ const (
 	DefaultGrace        = 30 * time.Second
 	DefaultTTL          = time.Minute
 	DefaultReapInterval = time.Minute
+	DefaultMaxRepeaters = 128
 )
+
+// Resource limits of every repeater: it only runs sleep and one socat per
+// stream, so these bound a misbehaving repeater, not a working one.
+const (
+	repeaterPidsLimit   = 256
+	repeaterMemoryBytes = 64 << 20
+)
+
+// repeaterNamePrefix starts the name of every repeater container.
+const repeaterNamePrefix = "doktunnel-repeater-"
 
 // Labels on every repeater container.
 const (
@@ -35,7 +47,7 @@ const (
 	LabelRepeater = "dev.doktunnel.repeater"
 	// LabelOwner is the ID of the companion process that created it.
 	LabelOwner = "dev.doktunnel.owner"
-	// LabelTarget is the host the repeater reaches.
+	// LabelTarget names the target the repeater reaches, for people only.
 	LabelTarget = "dev.doktunnel.target"
 	// LabelNetwork is the network the repeater joined.
 	LabelNetwork = "dev.doktunnel.network"
@@ -46,8 +58,16 @@ const (
 // errClosed means the Repeater was closed.
 var errClosed = errors.New("the repeater is closed")
 
-// removeTimeout bounds removing one repeater.
-const removeTimeout = 30 * time.Second
+// ErrTooManyRepeaters means MaxRepeaters repeaters are in use and none is
+// idle.
+var ErrTooManyRepeaters = errors.New("too many repeaters are running")
+
+const (
+	// removeTimeout bounds removing one repeater.
+	removeTimeout = 30 * time.Second
+	// reapTimeout bounds one pass of the reaper.
+	reapTimeout = 2 * time.Minute
+)
 
 // Options configure a Repeater. Zero values take the defaults.
 type Options struct {
@@ -65,6 +85,13 @@ type Options struct {
 	ReapInterval time.Duration
 	// Owner identifies this process in LabelOwner; random by default.
 	Owner string
+	// MaxRepeaters caps the repeaters running at once;
+	// DefaultMaxRepeaters by default. Idle repeaters are removed early to
+	// make room.
+	MaxRepeaters int
+	// ComposeDir is where Dokploy keeps compose deployments;
+	// DefaultComposeDir by default.
+	ComposeDir string
 	// Log receives lifecycle events; nothing is logged when nil.
 	Log *slog.Logger
 }
@@ -77,6 +104,8 @@ type Repeater struct {
 	log    *slog.Logger
 	// now is the clock of the reaper.
 	now func() time.Time
+	// reapTimeout bounds one pass of the reaper.
+	reapTimeout time.Duration
 
 	mu      sync.Mutex
 	closed  bool
@@ -86,10 +115,10 @@ type Repeater struct {
 	busy sync.WaitGroup
 }
 
-// entryKey identifies a repeater: one per target on one network.
+// entryKey identifies a repeater: one per target address on one network.
 type entryKey struct {
 	network string
-	host    string
+	addr    string
 }
 
 // entry is a repeater shared by the tunnels to one target.
@@ -111,23 +140,29 @@ func New(c *docker.Client, opts Options) *Repeater {
 	opts.TTL = cmp.Or(opts.TTL, DefaultTTL)
 	opts.ReapInterval = cmp.Or(opts.ReapInterval, DefaultReapInterval)
 	opts.Owner = cmp.Or(opts.Owner, randomHex(8))
+	opts.MaxRepeaters = cmp.Or(opts.MaxRepeaters, DefaultMaxRepeaters)
+	opts.ComposeDir = cmp.Or(opts.ComposeDir, DefaultComposeDir)
 	log := opts.Log
 	if log == nil {
 		log = slog.New(slog.DiscardHandler)
 	}
-	return &Repeater{docker: c, opts: opts, log: log, now: time.Now, entries: map[entryKey]*entry{}}
+	return &Repeater{docker: c, opts: opts, log: log, now: time.Now, reapTimeout: reapTimeout, entries: map[entryKey]*entry{}}
 }
 
 // acquire returns the running repeater for ep, creating it when needed,
 // and a release func to call once when the tunnel using it ends.
 func (r *Repeater) acquire(ctx context.Context, ep Endpoint) (string, func(), error) {
-	key := entryKey{network: ep.Network.ID, host: ep.Host}
+	key := keyOf(ep)
 	r.mu.Lock()
 	if r.closed {
 		r.mu.Unlock()
 		return "", nil, errClosed
 	}
 	e, exists := r.entries[key]
+	if !exists && len(r.entries) >= r.opts.MaxRepeaters && !r.evictIdleLocked() {
+		r.mu.Unlock()
+		return "", nil, fmt.Errorf("%w (%d)", ErrTooManyRepeaters, r.opts.MaxRepeaters)
+	}
 	if !exists {
 		e = &entry{ready: make(chan struct{})}
 		r.entries[key] = e
@@ -173,6 +208,25 @@ func (r *Repeater) acquire(ctx context.Context, ep Endpoint) (string, func(), er
 	return e.id, release, nil
 }
 
+// keyOf returns the key of the repeater for ep.
+func keyOf(ep Endpoint) entryKey {
+	return entryKey{network: ep.Network.ID, addr: ep.Addr.String()}
+}
+
+// evictIdleLocked removes one repeater no tunnel uses, waiting out its
+// grace period, and reports whether there was one; r.mu must be held.
+func (r *Repeater) evictIdleLocked() bool {
+	for key, e := range r.entries {
+		if e.refs == 0 && e.timer != nil {
+			e.timer.Stop()
+			delete(r.entries, key)
+			r.removeLocked(e.id, "evicted to make room")
+			return true
+		}
+	}
+	return false
+}
+
 // release drops one reference to e, and schedules its removal after the
 // grace period when it was the last one.
 func (r *Repeater) release(key entryKey, e *entry) {
@@ -197,7 +251,7 @@ func (r *Repeater) release(key entryKey, e *entry) {
 // invalidate forgets e, for a repeater that died, and removes it. Tunnels
 // still holding it release it as usual.
 func (r *Repeater) invalidate(ep Endpoint, id string) {
-	key := entryKey{network: ep.Network.ID, host: ep.Host}
+	key := keyOf(ep)
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if e := r.entries[key]; e != nil && e.id == id {
@@ -236,7 +290,7 @@ func (r *Repeater) create(ctx context.Context, ep Endpoint) (string, error) {
 		Labels: map[string]string{
 			LabelRepeater:  "1",
 			LabelOwner:     r.opts.Owner,
-			LabelTarget:    ep.Host,
+			LabelTarget:    ep.Name,
 			LabelNetwork:   ep.Network.Name,
 			LabelCreatedAt: time.Now().UTC().Format(time.RFC3339),
 		},
@@ -246,9 +300,13 @@ func (r *Repeater) create(ctx context.Context, ep Endpoint) (string, error) {
 			ReadonlyRootfs: true,
 			CapDrop:        []string{"ALL"},
 			SecurityOpt:    []string{"no-new-privileges"},
+			// An init reaps the socat processes of ended streams.
+			Init:      ptr(true),
+			PidsLimit: ptr(int64(repeaterPidsLimit)),
+			Memory:    repeaterMemoryBytes,
 		},
 	}
-	name := "doktunnel-repeater-" + randomHex(6)
+	name := repeaterNamePrefix + randomHex(6)
 	id, err := r.docker.CreateContainer(ctx, name, cfg)
 	if docker.IsNotFound(err) && strings.Contains(strings.ToLower(err.Error()), "no such image") {
 		if perr := r.docker.PullImage(ctx, r.opts.Image); perr != nil {
@@ -269,7 +327,7 @@ func (r *Repeater) create(ctx context.Context, ep Endpoint) (string, error) {
 		r.mu.Unlock()
 		return "", fmt.Errorf("starting repeater: %w", err)
 	}
-	r.log.Info("repeater started", "container", shortID(id), "target", ep.Host, "network", ep.Network.Name)
+	r.log.Info("repeater started", "container", shortID(id), "target", ep.Name, "network", ep.Network.Name)
 	return id, nil
 }
 
@@ -277,6 +335,10 @@ func (r *Repeater) create(ctx context.Context, ep Endpoint) (string, error) {
 // that is older than the TTL, running or not, and returns their IDs. One
 // companion per Docker daemon is assumed: another live companion's
 // repeaters would be reaped too.
+//
+// The repeater label alone proves nothing, since any container may carry
+// it: a container is only removed when it also has a repeater's name and
+// runs the configured repeater image.
 func (r *Repeater) Reap(ctx context.Context) ([]string, error) {
 	found, err := r.docker.ListContainers(ctx, docker.ListOptions{All: true, Labels: []string{LabelRepeater + "=1"}})
 	if err != nil {
@@ -295,7 +357,18 @@ func (r *Repeater) Reap(ctx context.Context) ([]string, error) {
 	var errs []error
 	cutoff := r.now().Add(-r.opts.TTL)
 	for _, c := range found {
-		if tracked[c.ID] || time.Unix(c.Created, 0).After(cutoff) {
+		if tracked[c.ID] || time.Unix(c.Created, 0).After(cutoff) || !slices.ContainsFunc(c.Names, isRepeaterName) {
+			continue
+		}
+		ctr, err := r.docker.InspectContainer(ctx, c.ID)
+		if docker.IsNotFound(err) {
+			continue
+		}
+		if err != nil {
+			errs = append(errs, fmt.Errorf("inspecting repeater %s: %w", shortID(c.ID), err))
+			continue
+		}
+		if ctr.Config.Image != r.opts.Image || ctr.Config.Labels[LabelRepeater] != "1" || !isRepeaterName(ctr.Name) {
 			continue
 		}
 		if err := r.docker.RemoveContainer(ctx, c.ID); err != nil && !docker.IsNotFound(err) {
@@ -313,7 +386,10 @@ func (r *Repeater) Run(ctx context.Context) {
 	ticker := time.NewTicker(r.opts.ReapInterval)
 	defer ticker.Stop()
 	for {
-		removed, err := r.Reap(ctx)
+		// A daemon that stops answering must not stall the reaper.
+		reapCtx, cancel := context.WithTimeout(ctx, r.reapTimeout)
+		removed, err := r.Reap(reapCtx)
+		cancel()
 		if err != nil && ctx.Err() == nil {
 			r.log.Warn("reaping repeaters failed", "error", err)
 		}
@@ -361,6 +437,14 @@ func (r *Repeater) Close(ctx context.Context) error {
 		return fmt.Errorf("removing repeaters: %w", ctx.Err())
 	}
 }
+
+// isRepeaterName reports whether a container name, with or without its
+// leading slash, is a repeater's.
+func isRepeaterName(name string) bool {
+	return strings.HasPrefix(strings.TrimPrefix(name, "/"), repeaterNamePrefix)
+}
+
+func ptr[T any](v T) *T { return &v }
 
 func shortID(id string) string {
 	return id[:min(len(id), 12)]

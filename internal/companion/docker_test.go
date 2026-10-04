@@ -2,6 +2,7 @@ package companion
 
 import (
 	"bufio"
+	"cmp"
 	"context"
 	"io"
 	"log/slog"
@@ -69,14 +70,32 @@ func TestRepeaterTarget(t *testing.T) {
 
 // dockerCompanion is a companion whose bridge runs repeaters on a fake
 // Docker daemon. Compose stack cmp_myapp has its postgres service running
-// on the project network, reachable at targetAddr.
+// on the project network at pgIP, reachable at targetAddr.
 type dockerCompanion struct {
 	fake   *dockertest.Fake
 	bridge *DockerBridge
 	http   *httptest.Server
+	// targetAddr is where socat in a repeater connects for any address
+	// in reachable.
+	targetAddr string
+	reachable  map[string]bool
 }
 
-func newDockerCompanion(t *testing.T, targetAddr string) *dockerCompanion {
+// pgIP is the address of cmp_myapp's postgres service on its network.
+const pgIP = "172.20.0.5"
+
+// addSwarmService adds a Swarm service with one running task at addr on
+// network netID.
+func addSwarmService(fake *dockertest.Fake, id, name, netID, addr string) {
+	fake.AddService(docker.Service{ID: id, Spec: docker.ServiceSpec{Name: name}})
+	task := docker.Task{ID: "task-" + id, ServiceID: id}
+	att := docker.TaskNetwork{Addresses: []string{addr + "/24"}}
+	att.Network.ID = netID
+	task.NetworksAttachments = []docker.TaskNetwork{att}
+	fake.AddTask(task)
+}
+
+func newDockerCompanion(t *testing.T, targetAddr string, opts repeater.Options) *dockerCompanion {
 	t.Helper()
 	const project = "shop-cmpmyapp-a1b2c3" // the fake Dokploy's appName for cmp_myapp
 	fake := dockertest.New(t)
@@ -84,19 +103,22 @@ func newDockerCompanion(t *testing.T, targetAddr string) *dockerCompanion {
 	fake.AddNetwork(docker.Network{ID: "net-proj", Name: project + "_default", Driver: "bridge", Scope: "local",
 		Labels: map[string]string{"com.docker.compose.project": project}})
 	fake.AddNetwork(docker.Network{ID: "net-closed", Name: "closed-net", Driver: "overlay", Scope: "swarm"})
+	fake.AddNetwork(docker.Network{ID: "net-team", Name: "team-net", Driver: "overlay", Scope: "swarm", Attachable: true})
 	fake.AddContainer(dockertest.Container{
 		ID: "pg", Name: project + "-postgres-1", Running: true,
-		Labels:   map[string]string{"com.docker.compose.project": project, "com.docker.compose.service": "postgres"},
+		Labels: map[string]string{
+			"com.docker.compose.project":             project,
+			"com.docker.compose.service":             "postgres",
+			"com.docker.compose.project.working_dir": repeater.DefaultComposeDir + "/" + project + "/code",
+		},
 		Networks: map[string][]string{project + "_default": {"postgres"}},
+		IPs:      map[string]string{project + "_default": pgIP},
 	})
 	// pg_main runs only on a non-attachable overlay.
-	fake.AddContainer(dockertest.Container{
-		ID: "pgmain", Name: "shop-pgmain-a1b2c3.1.x", Running: true,
-		Labels:   map[string]string{"com.docker.swarm.service.name": "shop-pgmain-a1b2c3"},
-		Networks: map[string][]string{"closed-net": nil},
-	})
+	addSwarmService(fake, "svc-pgmain", "shop-pgmain-a1b2c3", "net-closed", "10.0.4.5")
+	dc := &dockerCompanion{fake: fake, targetAddr: targetAddr, reachable: map[string]bool{pgIP: true}}
 	fake.ExecHandler = dockertest.Socat(func(host string) (string, bool) {
-		return targetAddr, host == "postgres"
+		return dc.targetAddr, dc.reachable[host]
 	})
 
 	client, err := docker.New(fake.Host())
@@ -104,8 +126,9 @@ func newDockerCompanion(t *testing.T, targetAddr string) *dockerCompanion {
 		t.Fatal(err)
 	}
 	log := slog.New(slog.DiscardHandler)
-	bridge := NewDockerBridge(client, repeater.Options{Grace: time.Millisecond, Log: log})
-	srv := NewServer(NewAuthorizer(newFakeDokploy(t).start(), ""), bridge, log)
+	opts.Grace, opts.Log = cmp.Or(opts.Grace, time.Millisecond), log
+	bridge := NewDockerBridge(client, opts)
+	srv := NewServer(NewAuthorizer(newFakeDokploy(t).start(), ""), bridge, log, Limits{})
 	hs := httptest.NewServer(srv)
 	t.Cleanup(func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -116,7 +139,8 @@ func newDockerCompanion(t *testing.T, targetAddr string) *dockerCompanion {
 			t.Errorf("closing the bridge: %v", err)
 		}
 	})
-	return &dockerCompanion{fake: fake, bridge: bridge, http: hs}
+	dc.bridge, dc.http = bridge, hs
+	return dc
 }
 
 func echoUpper(t *testing.T) string {
@@ -145,7 +169,7 @@ func echoUpper(t *testing.T) string {
 }
 
 func TestDockerBridge_TunnelToAComposeService(t *testing.T) {
-	dc := newDockerCompanion(t, echoUpper(t))
+	dc := newDockerCompanion(t, echoUpper(t), repeater.Options{})
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	url := strings.Replace(dc.http.URL, "http", "ws", 1) + tunnel.Path +
@@ -188,7 +212,7 @@ func TestDockerBridge_Rejections(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			dc := newDockerCompanion(t, closedTCPAddr(t))
+			dc := newDockerCompanion(t, closedTCPAddr(t), repeater.Options{})
 			resp := request(t, http.MethodGet, dc.http.URL+tunnel.Path+"?"+tt.query, ownerKey, upgradeHeaders())
 			assertRejected(t, resp, tt.status, tt.code)
 		})
@@ -196,9 +220,13 @@ func TestDockerBridge_Rejections(t *testing.T) {
 }
 
 func TestDockerBridge_ExposedPorts(t *testing.T) {
-	dc := newDockerCompanion(t, closedTCPAddr(t))
+	dc := newDockerCompanion(t, closedTCPAddr(t), repeater.Options{})
+	dc.fake.AddService(docker.Service{ID: "svc-redis", Spec: docker.ServiceSpec{Name: "shop-redis"}})
+	task := docker.Task{ID: "task-redis", ServiceID: "svc-redis"}
+	task.Status.ContainerStatus.ContainerID = "redis"
+	dc.fake.AddTask(task)
 	dc.fake.AddContainer(dockertest.Container{
-		ID: "redis", Name: "shop-redis-1", Running: true,
+		ID: "redis", Name: "shop-redis.1.x", Running: true,
 		Labels:       map[string]string{"com.docker.swarm.service.name": "shop-redis"},
 		ExposedPorts: []string{"6379/tcp"},
 	})
@@ -208,6 +236,41 @@ func TestDockerBridge_ExposedPorts(t *testing.T) {
 	})
 	if err != nil || len(got) != 1 || got[0] != (repeater.Port{Number: 6379, Protocol: "tcp"}) {
 		t.Errorf("ExposedPorts = %v, %v", got, err)
+	}
+}
+
+func TestDockerBridge_RepeaterCapIsTooManyTunnels(t *testing.T) {
+	dc := newDockerCompanion(t, echoUpper(t), repeater.Options{MaxRepeaters: 1})
+	// app_web is reachable too, on its own network: a second repeater.
+	addSwarmService(dc.fake, "svc-appweb", "shop-appweb-a1b2c3", "net-team", "10.0.2.9")
+	dc.reachable["10.0.2.9"] = true
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	url := strings.Replace(dc.http.URL, "http", "ws", 1) + tunnel.Path +
+		"?serviceType=compose_service&serviceId=cmp_myapp/postgres&port=5432"
+	c, _, err := websocket.Dial(ctx, url, &websocket.DialOptions{HTTPHeader: http.Header{tunnel.HeaderAPIKey: {ownerKey}}})
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	defer c.CloseNow()
+
+	resp := request(t, http.MethodGet, dc.http.URL+tunnel.Path+"?serviceType=application&serviceId=app_web&port=3000", ownerKey, upgradeHeaders())
+	assertRejected(t, resp, http.StatusTooManyRequests, codeTooManyTunnels)
+}
+
+func TestExposedDockerHost(t *testing.T) {
+	for host, want := range map[string]bool{
+		"unix:///var/run/docker.sock": false,
+		"tcp://127.0.0.1:2375":        false,
+		"tcp://[::1]:2375":            false,
+		"tcp://localhost:2375":        false,
+		"tcp://docker-proxy:2375":     true,
+		"tcp://10.0.0.5:2375":         true,
+	} {
+		if got := exposedDockerHost(host); got != want {
+			t.Errorf("exposedDockerHost(%q) = %v, want %v", host, got, want)
+		}
 	}
 }
 

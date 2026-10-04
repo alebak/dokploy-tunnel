@@ -237,6 +237,32 @@ func TestClient_ContainerLifecycle(t *testing.T) {
 	if err := c.RemoveContainer(ctx, id); !docker.IsNotFound(err) {
 		t.Errorf("removing twice: error = %v, want not found", err)
 	}
+	if n := fake.VolumeRemovals(); n != 0 {
+		t.Errorf("RemoveContainer asked to remove volumes %d times", n)
+	}
+}
+
+func TestClient_ListTasks_Filters(t *testing.T) {
+	fake := dockertest.New(t)
+	fake.AddService(docker.Service{ID: "s1", Spec: docker.ServiceSpec{Name: "web"}})
+	fake.AddService(docker.Service{ID: "s2", Spec: docker.ServiceSpec{Name: "db"}})
+	running := docker.Task{ID: "t1", ServiceID: "s1"}
+	running.Status.ContainerStatus.ContainerID = "c1"
+	att := docker.TaskNetwork{Addresses: []string{"10.0.1.7/24"}}
+	att.Network.ID = "net1"
+	running.NetworksAttachments = []docker.TaskNetwork{att}
+	fake.AddTask(running)
+	fake.AddTask(docker.Task{ID: "t2", ServiceID: "s1", DesiredState: "shutdown"})
+	fake.AddTask(docker.Task{ID: "t3", ServiceID: "s2"})
+
+	got, err := newClient(t, fake).ListTasks(testContext(t), docker.TaskListOptions{Service: "s1", DesiredState: "running"})
+	if err != nil {
+		t.Fatalf("ListTasks: %v", err)
+	}
+	if len(got) != 1 || got[0].ID != "t1" || got[0].Status.ContainerStatus.ContainerID != "c1" ||
+		got[0].NetworksAttachments[0].Network.ID != "net1" || got[0].NetworksAttachments[0].Addresses[0] != "10.0.1.7/24" {
+		t.Errorf("ListTasks = %+v, want running task t1 with its attachment", got)
+	}
 }
 
 func TestClient_PullImage_StreamError(t *testing.T) {
