@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/alebak/dokploy-tunnel/internal/fsutil"
+	"github.com/alebak/dokploy-tunnel/internal/hostname"
 )
 
 // schemaVersion is the lease file format version. Bump it on incompatible
@@ -38,6 +39,9 @@ type fileLease struct {
 	ServiceID      string     `json:"service_id"`
 	IP             netip.Addr `json:"ip"`
 	CreatedAt      time.Time  `json:"created_at"`
+	// Names are the display names the lease's hostname is built from; files
+	// written before names were recorded have none.
+	Names hostname.Names `json:"names,omitzero"`
 }
 
 func (l fileLease) key() Key {
@@ -45,7 +49,7 @@ func (l fileLease) key() Key {
 }
 
 func (l fileLease) lease() Lease {
-	return Lease{Key: l.key(), IP: l.IP, CreatedAt: l.CreatedAt}
+	return Lease{Key: l.key(), IP: l.IP, CreatedAt: l.CreatedAt, Names: l.Names}
 }
 
 // find returns the index of the lease for the normalized key k, or -1.

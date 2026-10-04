@@ -17,7 +17,8 @@ type Key struct {
 	// OrganizationID is the Dokploy organization ID.
 	OrganizationID string
 	// ServiceID is the Dokploy ID of the application, database or compose
-	// service.
+	// service, or "<compose ID>/<service>" for a service inside a compose
+	// stack, so each of those keeps its own address.
 	ServiceID string
 }
 
