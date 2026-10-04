@@ -18,13 +18,9 @@ import (
 	"time"
 )
 
-const (
-	// maxResponseBytes bounds how much of a response is read; the procedures
-	// used here return small objects.
-	maxResponseBytes = 1 << 20
-	// requestTimeout bounds each request, including reading the response.
-	requestTimeout = 30 * time.Second
-)
+// requestTimeout bounds each request, including reading the response.
+// Response size limits are in limits.go.
+const requestTimeout = 30 * time.Second
 
 var (
 	// ErrInvalidURL means a panel URL is malformed.
@@ -174,12 +170,13 @@ func (c *Client) query(ctx context.Context, procedure string, params url.Values,
 		return fmt.Errorf("%w: HTTP %d from %s", ErrUnexpectedResponse, resp.StatusCode, procedure)
 	}
 
-	body, err := io.ReadAll(io.LimitReader(resp.Body, maxResponseBytes+1))
+	limit := responseLimit(procedure)
+	body, err := io.ReadAll(io.LimitReader(resp.Body, limit+1))
 	if err != nil {
 		return fmt.Errorf("%w: reading %s response: %v", ErrUnreachable, procedure, err)
 	}
-	if len(body) > maxResponseBytes {
-		return fmt.Errorf("%w: %s response exceeds %d bytes", ErrUnexpectedResponse, procedure, maxResponseBytes)
+	if int64(len(body)) > limit {
+		return &ResponseTooLargeError{Procedure: procedure, Limit: limit}
 	}
 	if err := json.Unmarshal(body, out); err != nil {
 		return fmt.Errorf("%w: %s did not return JSON: %v", ErrUnexpectedResponse, procedure, err)
