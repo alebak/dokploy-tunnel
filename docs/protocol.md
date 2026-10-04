@@ -139,9 +139,10 @@ existing codes keep their meaning.
   frame. Errors after the upgrade are reported only in the close frame.
 - There is no half-close. When either side's TCP connection ends, its peer
   closes the WebSocket and the whole stream ends.
-- The companion pings every 30 seconds and closes a connection whose peer
-  does not answer within 15 seconds. WebSocket libraries answer pings
-  automatically. Idle streams are otherwise kept open indefinitely.
+- The companion sends a ping every 30 seconds so that proxies do not close
+  idle streams; WebSocket libraries answer pings automatically. A late pong
+  is not an error, since a slow target delays reading it. Idle streams are
+  kept open indefinitely; dead peers are detected by TCP keepalive.
 
 A target that refuses connections can appear as an upgrade followed by an
 immediate close, because the companion may only learn it when it first
@@ -155,7 +156,7 @@ writes or reads.
 | 1001 going away | The companion is shutting down |
 | 1003 unsupported data | The peer sent a text message |
 | 1009 message too big | The peer sent a message over 64 KiB |
-| 1011 internal error | The stream to the target failed, or the peer stopped answering pings |
+| 1011 internal error | Reading from or writing to the target or the peer failed |
 
 Codes 4000–4999 are reserved for future use by this protocol.
 

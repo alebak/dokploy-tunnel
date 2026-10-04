@@ -143,6 +143,12 @@ func ParseTarget(q url.Values) (Target, error) {
 	return t, nil
 }
 
+// ValidID reports whether id has the form of a Dokploy ID, such as a
+// service or server ID.
+func ValidID(id string) bool {
+	return dokployID.MatchString(id)
+}
+
 // single returns the one value of the query parameter name.
 func single(q url.Values, name string) (string, error) {
 	switch v := q[name]; {
@@ -163,4 +169,21 @@ func knownType(typ string) bool {
 		}
 	}
 	return false
+}
+
+// ParseServerID reads the optional serverId parameter of a tunnel request:
+// a Dokploy server ID, LocalServer, or empty when absent. It fails with
+// ErrInvalidTarget.
+func ParseServerID(q url.Values) (string, error) {
+	if len(q[ParamServerID]) == 0 {
+		return "", nil
+	}
+	id, err := single(q, ParamServerID)
+	if err != nil {
+		return "", err
+	}
+	if !ValidID(id) {
+		return "", fmt.Errorf("%w: malformed %s", ErrInvalidTarget, ParamServerID)
+	}
+	return id, nil
 }

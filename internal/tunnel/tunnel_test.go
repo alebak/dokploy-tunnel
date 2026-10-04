@@ -126,3 +126,25 @@ func TestTarget_String(t *testing.T) {
 		}
 	}
 }
+
+func TestParseServerID(t *testing.T) {
+	tests := []struct {
+		query   string
+		want    string
+		wantErr bool
+	}{
+		{"", "", false},
+		{"serverId=srv_edge", "srv_edge", false},
+		{"serverId=local", LocalServer, false},
+		{"serverId=", "", true},
+		{"serverId=a%2Fb", "", true},
+		{"serverId=a&serverId=b", "", true},
+	}
+	for _, tt := range tests {
+		q, _ := url.ParseQuery(tt.query)
+		got, err := ParseServerID(q)
+		if (err != nil) != tt.wantErr || got != tt.want {
+			t.Errorf("ParseServerID(%q) = %q, %v; want %q, error %v", tt.query, got, err, tt.want, tt.wantErr)
+		}
+	}
+}
