@@ -2,7 +2,8 @@ name: platform
 
 # Verifies platform behavior that unit tests can only fake: binding leased
 # loopback addresses and, on macOS, lo0 aliases, and the hosts file round
-# trip with real privileges and the system resolver. These checks run sudo and
+# trip with real privileges and the system resolver, and the install scripts
+# against locally served GoReleaser snapshot artifacts. These checks run sudo and
 # change the runner, so they live in the internal/platformtest package
 # behind the "platform" build tag and only run when DOKTUNNEL_PLATFORM_TESTS
 # is set on GitHub Actions. Never run them on a developer machine.
@@ -38,6 +39,9 @@ jobs:
       DOKTUNNEL_PLATFORM_TESTS: "1"
     steps:
       - uses: actions/checkout@v7
+        with:
+          # GoReleaser derives the snapshot version from the tags.
+          fetch-depth: 0
 
       - uses: actions/setup-go@v7
         with:
@@ -69,3 +73,107 @@ jobs:
       - name: Hosts file round trip with privileges
         if: ${{ !cancelled() }}
         run: go test -tags platform -count=1 -v -run TestHosts ./internal/platformtest/
+
+      - name: Build snapshot release artifacts
+        if: ${{ !cancelled() }}
+        uses: goreleaser/goreleaser-action@v7
+        with:
+          args: release --snapshot --clean
+
+      # Serves the archives twice from 127.0.0.1: "good" as built, and "bad"
+      # with every checksum replaced, which the installers must refuse.
+      - name: Prepare local download site
+        if: ${{ !cancelled() }}
+        shell: pwsh
+        run: |
+          $version = (Get-Content -Raw -LiteralPath dist/metadata.json | ConvertFrom-Json).version
+          if (-not $version) { throw 'dist/metadata.json has no version' }
+          "DOKTUNNEL_VERSION=$version" | Add-Content -LiteralPath $env:GITHUB_ENV
+          $site = Join-Path $env:RUNNER_TEMP 'site'
+          $good = New-Item -ItemType Directory -Force -Path (Join-Path $site 'good')
+          $bad = New-Item -ItemType Directory -Force -Path (Join-Path $site 'bad')
+          Get-ChildItem -Path dist -File | Where-Object { $_.Name -like 'doktunnel_*' -or $_.Name -eq 'checksums.txt' } |
+            ForEach-Object { Copy-Item -LiteralPath $_.FullName -Destination $good; Copy-Item -LiteralPath $_.FullName -Destination $bad }
+          $zeros = '0' * 64
+          Get-Content -LiteralPath (Join-Path $good 'checksums.txt') |
+            ForEach-Object { $zeros + '  ' + ($_ -split '\s+', 2)[1] } |
+            Set-Content -LiteralPath (Join-Path $bad 'checksums.txt')
+          Write-Host "Snapshot version: $version"
+          Get-ChildItem -Recurse -File -Path $site | ForEach-Object { Write-Host $_.FullName }
+          "DOKTUNNEL_SITE=$site" | Add-Content -LiteralPath $env:GITHUB_ENV
+
+      - name: Install with install.sh from snapshot artifacts
+        if: ${{ !cancelled() && runner.os != 'Windows' }}
+        shell: bash
+        run: |
+          python3 -m http.server 8765 --bind 127.0.0.1 --directory "$DOKTUNNEL_SITE" >"$RUNNER_TEMP/http.log" 2>&1 &
+          server=$!
+          trap 'kill "$server"' EXIT
+          for _ in $(seq 1 30); do
+            curl -fsS -o /dev/null http://127.0.0.1:8765/good/checksums.txt && break
+            sleep 1
+          done
+
+          bad_dir="$RUNNER_TEMP/doktunnel-bad"
+          if DOKTUNNEL_TEST_DOWNLOAD_BASE=http://127.0.0.1:8765/bad DOKTUNNEL_INSTALL_DIR="$bad_dir" bash scripts/install.sh; then
+            echo "::error::install.sh accepted an archive whose checksum does not match"
+            exit 1
+          fi
+          if [ -e "$bad_dir/doktunnel" ]; then
+            echo "::error::install.sh installed doktunnel despite a checksum mismatch"
+            exit 1
+          fi
+          echo "- $RUNNER_OS: install.sh refused an archive with a wrong checksum" >>"$GITHUB_STEP_SUMMARY"
+
+          install_dir="$RUNNER_TEMP/doktunnel-bin"
+          DOKTUNNEL_TEST_DOWNLOAD_BASE=http://127.0.0.1:8765/good DOKTUNNEL_INSTALL_DIR="$install_dir" bash scripts/install.sh
+          installed="$("$install_dir/doktunnel" --version)"
+          echo "$installed"
+          case "$installed" in
+            *"$DOKTUNNEL_VERSION"*) ;;
+            *) echo "::error::installed doktunnel reports '$installed', want version $DOKTUNNEL_VERSION"; exit 1 ;;
+          esac
+          echo "- $RUNNER_OS: install.sh installed the snapshot (checksum verified): \`$installed\`" >>"$GITHUB_STEP_SUMMARY"
+
+      - name: Install with install.ps1 from snapshot artifacts
+        if: ${{ !cancelled() && runner.os == 'Windows' }}
+        shell: pwsh
+        run: |
+          $server = Start-Process -FilePath python -ArgumentList '-m', 'http.server', '8765', '--bind', '127.0.0.1', '--directory', $env:DOKTUNNEL_SITE -PassThru -WindowStyle Hidden
+          try {
+            foreach ($i in 1..30) {
+              try { Invoke-WebRequest -UseBasicParsing -Uri 'http://127.0.0.1:8765/good/checksums.txt' | Out-Null; break } catch { Start-Sleep -Seconds 1 }
+            }
+            $script = Get-Content -Raw -LiteralPath scripts/install.ps1
+
+            # A checksum mismatch must stop the install, run as "irm | iex" would.
+            $env:DOKTUNNEL_TEST_DOWNLOAD_BASE = 'http://127.0.0.1:8765/bad'
+            $env:DOKTUNNEL_INSTALL_DIR = Join-Path $env:RUNNER_TEMP 'doktunnel-bad'
+            $refused = $false
+            try { Invoke-Expression $script } catch { $refused = "$_" -like '*Checksum mismatch*'; Write-Host "Refused: $_" }
+            if (-not $refused -or (Test-Path -LiteralPath (Join-Path $env:DOKTUNNEL_INSTALL_DIR 'doktunnel.exe'))) {
+              throw 'install.ps1 did not refuse an archive whose checksum does not match'
+            }
+            "- Windows: install.ps1 refused an archive with a wrong checksum" | Add-Content -LiteralPath $env:GITHUB_STEP_SUMMARY
+
+            $env:DOKTUNNEL_TEST_DOWNLOAD_BASE = 'http://127.0.0.1:8765/good'
+            # PowerShell 7, as "irm | iex" runs it.
+            $env:DOKTUNNEL_INSTALL_DIR = Join-Path $env:RUNNER_TEMP 'doktunnel-pwsh'
+            Invoke-Expression $script
+            # Windows PowerShell 5.1, which the script also supports.
+            $desktop = Join-Path $env:RUNNER_TEMP 'doktunnel-desktop'
+            $env:DOKTUNNEL_INSTALL_DIR = $desktop
+            powershell.exe -NoProfile -NonInteractive -Command 'Get-Content -Raw -LiteralPath scripts/install.ps1 | Invoke-Expression'
+            if ($LASTEXITCODE -ne 0) { throw "install.ps1 failed under Windows PowerShell 5.1 (exit $LASTEXITCODE)" }
+
+            foreach ($dir in (Join-Path $env:RUNNER_TEMP 'doktunnel-pwsh'), $desktop) {
+              $installed = & (Join-Path $dir 'doktunnel.exe') --version
+              if ($LASTEXITCODE -ne 0 -or "$installed" -notlike "*$($env:DOKTUNNEL_VERSION)*") {
+                throw "doktunnel in $dir reports '$installed', want version $($env:DOKTUNNEL_VERSION)"
+              }
+              Write-Host "${dir}: $installed"
+              "- Windows: install.ps1 installed the snapshot (checksum verified) to $(Split-Path -Leaf $dir): ``$installed``" | Add-Content -LiteralPath $env:GITHUB_STEP_SUMMARY
+            }
+          } finally {
+            Stop-Process -Id $server.Id -Force -ErrorAction SilentlyContinue
+          }

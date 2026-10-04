@@ -7,6 +7,15 @@
 #   DOKTUNNEL_VERSION      Version to install (e.g. 0.1.0 or v0.1.0). Default: latest release.
 #   DOKTUNNEL_INSTALL_DIR  Target directory. Default: %LOCALAPPDATA%\Programs\doktunnel.
 #
+# Test only (never needed to install doktunnel):
+#   DOKTUNNEL_TEST_DOWNLOAD_BASE
+#                          Download the archive and checksums.txt from this
+#                          http://127.0.0.1:<port>[/path] or http://localhost:<port>[/path]
+#                          URL instead of the GitHub release. The platform CI
+#                          workflow uses it to install locally built snapshot
+#                          artifacts. Requires DOKTUNNEL_VERSION; the checksum is
+#                          still verified.
+#
 # The script runs inside a function and reports failures with `throw` instead of
 # `exit`, so piping it to `iex` never closes the caller's PowerShell session.
 
@@ -36,6 +45,17 @@ function Install-Doktunnel {
         default { throw "Unsupported architecture: $rawArch" }
     }
 
+    # Only this machine is accepted, so the override cannot point an install
+    # at another server.
+    $testBase = $null
+    if ($env:DOKTUNNEL_TEST_DOWNLOAD_BASE) {
+        $testBase = $env:DOKTUNNEL_TEST_DOWNLOAD_BASE.TrimEnd('/')
+        if ($testBase -cnotmatch '^http://(127\.0\.0\.1|localhost):[0-9]+(/[A-Za-z0-9._/-]*)?\z') {
+            throw 'DOKTUNNEL_TEST_DOWNLOAD_BASE is test-only and must be http://127.0.0.1:<port> or http://localhost:<port>'
+        }
+        if (-not $env:DOKTUNNEL_VERSION) { throw 'DOKTUNNEL_TEST_DOWNLOAD_BASE requires DOKTUNNEL_VERSION' }
+    }
+
     if ($env:DOKTUNNEL_VERSION) {
         $version = $env:DOKTUNNEL_VERSION.TrimStart('v')
     } else {
@@ -49,7 +69,7 @@ function Install-Doktunnel {
     }
 
     $archive = "${binary}_${version}_windows_${arch}.zip"
-    $baseUrl = "https://github.com/$owner/$repo/releases/download/v$version"
+    $baseUrl = if ($testBase) { $testBase } else { "https://github.com/$owner/$repo/releases/download/v$version" }
     $installDir = if ($env:DOKTUNNEL_INSTALL_DIR) { $env:DOKTUNNEL_INSTALL_DIR } else { Join-Path $env:LOCALAPPDATA "Programs\$binary" }
 
     Write-Host "[ok]      Platform: windows_$arch" -ForegroundColor Green
