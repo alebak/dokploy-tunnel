@@ -256,10 +256,16 @@ func (rs resolver) locateSwarm(ctx context.Context, t Target) (located, error) {
 	if t.Kind == KindStack && svc.Spec.Labels[labelStackNamespace] != t.AppName {
 		return located{}, fmt.Errorf("%w: Swarm service %s is not part of stack %s", ErrTargetUnreachable, name, t.AppName)
 	}
-	for _, m := range svc.Spec.TaskTemplate.ContainerSpec.Mounts {
-		if isDockerSocket(m.Source) || isDockerSocket(m.Target) {
-			return located{}, fmt.Errorf("%w: refusing Swarm service %s: it mounts the Docker socket", ErrTargetUnreachable, name)
+	// A task on another node cannot be inspected: the spec is all there
+	// is to judge it by.
+	spec := svc.Spec.TaskTemplate.ContainerSpec
+	for _, m := range spec.Mounts {
+		if mountExposesHost(m.Source) || isSocketPath(m.Target) {
+			return located{}, fmt.Errorf("%w: refusing Swarm service %s: %s", ErrTargetUnreachable, name, mountsDaemonSocket)
 		}
+	}
+	if c := dangerousCapability(spec.CapabilityAdd); c != "" {
+		return located{}, fmt.Errorf("%w: refusing Swarm service %s: it adds capability %s", ErrTargetUnreachable, name, c)
 	}
 
 	tasks, err := rs.docker.ListTasks(ctx, docker.TaskListOptions{Service: svc.ID, DesiredState: "running"})
@@ -382,7 +388,7 @@ func (rs resolver) composeContainerOf(ctr docker.Container, t Target) bool {
 // within reports whether the absolute path p is dir or inside it.
 func within(p, dir string) bool {
 	p = path.Clean(p)
-	return path.IsAbs(p) && (p == dir || strings.HasPrefix(p, dir+"/"))
+	return path.IsAbs(p) && (p == dir || strings.HasPrefix(p, strings.TrimSuffix(dir, "/")+"/"))
 }
 
 // projectDir is a Compose container's project directory, or its compose
@@ -402,36 +408,104 @@ func networkIDs(ctr docker.Container) []string {
 }
 
 // unsafeContainer returns why the companion must not forward to ctr, or
-// "". A privileged container, one on the host's network stack, or one
-// holding the Docker socket is host infrastructure, such as a Docker
-// socket proxy: a tunnel to it would hand whoever may read the Dokploy
-// service control of the host.
+// "". A privileged container, one sharing the host's network or PID
+// namespace, one given host devices or capabilities that reach past the
+// container, or one that can reach a container daemon's socket is host
+// infrastructure, such as a Docker socket proxy: a tunnel to it would hand
+// whoever may read the Dokploy service control of the host.
 func unsafeContainer(ctr docker.Container) string {
+	hc := ctr.HostConfig
 	switch {
-	case ctr.HostConfig.Privileged:
+	case hc.Privileged:
 		return "it runs privileged"
-	case ctr.HostConfig.NetworkMode == "host":
+	case hc.NetworkMode == "host":
 		return "it uses the host's network"
+	case hc.PidMode == "host":
+		return "it uses the host's PID namespace"
+	case len(hc.Devices) > 0:
+		return "it is given host devices"
+	}
+	if c := dangerousCapability(hc.CapAdd); c != "" {
+		return "it adds capability " + c
 	}
 	for _, m := range ctr.Mounts {
-		if isDockerSocket(m.Source) || isDockerSocket(m.Destination) {
-			return "it mounts the Docker socket"
+		if mountExposesHost(m.Source) || isSocketPath(m.Destination) {
+			return mountsDaemonSocket
 		}
 	}
-	for _, b := range ctr.HostConfig.Binds {
+	for _, b := range hc.Binds {
 		src, rest, _ := strings.Cut(b, ":")
 		dst, _, _ := strings.Cut(rest, ":")
-		if isDockerSocket(src) || isDockerSocket(dst) {
-			return "it mounts the Docker socket"
+		if mountExposesHost(src) || isSocketPath(dst) {
+			return mountsDaemonSocket
 		}
 	}
 	return ""
 }
 
-// isDockerSocket reports whether p is a Docker daemon socket, at
-// /var/run/docker.sock, /run/docker.sock or a rootless daemon's path.
-func isDockerSocket(p string) bool {
-	return p != "" && path.Base(p) == "docker.sock"
+const mountsDaemonSocket = "it mounts a daemon socket or a directory that may hold one"
+
+// daemonSockets are where container daemons listen. /var/run is a link to
+// /run on current distributions, but a mount names whichever path it was
+// given.
+var daemonSockets = []string{
+	"/run/docker.sock", "/var/run/docker.sock",
+	"/run/containerd/containerd.sock", "/var/run/containerd/containerd.sock",
+	"/run/podman/podman.sock", "/var/run/podman/podman.sock",
+}
+
+// rootlessRuntimeDirs hold the per-user runtime directories, such as
+// /run/user/1000, where rootless daemons put their sockets.
+var rootlessRuntimeDirs = []string{"/run/user", "/var/run/user"}
+
+// mountExposesHost reports whether mounting the host path src could hand
+// a container a daemon socket: src is a socket by name, a known daemon
+// socket or a directory holding one, or a rootless runtime directory, a
+// path inside one or a directory holding one. A source that is not an
+// absolute path names a volume and is judged by its destination alone.
+func mountExposesHost(src string) bool {
+	if !path.IsAbs(src) {
+		return false
+	}
+	src = path.Clean(src)
+	if isSocketPath(src) {
+		return true
+	}
+	for _, s := range daemonSockets {
+		if within(s, src) {
+			return true
+		}
+	}
+	for _, d := range rootlessRuntimeDirs {
+		if within(d, src) || within(src, d) {
+			return true
+		}
+	}
+	return false
+}
+
+// isSocketPath reports whether p names a Unix socket by convention.
+func isSocketPath(p string) bool {
+	return p != "" && strings.HasSuffix(path.Base(p), ".sock")
+}
+
+// dangerousCaps are capabilities that let a container act on the host:
+// mount file systems, trace or read host processes and files, load kernel
+// modules or programs, or reconfigure networking.
+var dangerousCaps = []string{
+	"ALL", "SYS_ADMIN", "SYS_PTRACE", "SYS_MODULE", "SYS_RAWIO",
+	"DAC_READ_SEARCH", "NET_ADMIN", "BPF", "PERFMON",
+}
+
+// dangerousCapability returns the first of caps, which may carry a CAP_
+// prefix in any case, that is in dangerousCaps, or "".
+func dangerousCapability(caps []string) string {
+	for _, c := range caps {
+		if slices.Contains(dangerousCaps, strings.TrimPrefix(strings.ToUpper(c), "CAP_")) {
+			return c
+		}
+	}
+	return ""
 }
 
 // chooseNetwork picks the best network of loc a repeater may join, and

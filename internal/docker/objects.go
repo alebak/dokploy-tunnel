@@ -45,6 +45,12 @@ type Container struct {
 		NetworkMode string `json:"NetworkMode"`
 		// Binds are bind mounts as "source:destination[:options]".
 		Binds []string `json:"Binds"`
+		// PidMode is "host" for a container in the host's PID namespace.
+		PidMode string `json:"PidMode"`
+		// CapAdd are the capabilities added to the default set, such as
+		// "NET_ADMIN" or "CAP_SYS_ADMIN".
+		CapAdd  []string        `json:"CapAdd"`
+		Devices []DeviceMapping `json:"Devices"`
 	} `json:"HostConfig"`
 	Mounts          []Mount `json:"Mounts"`
 	NetworkSettings struct {
@@ -58,6 +64,12 @@ type Mount struct {
 	Type        string `json:"Type"`
 	Source      string `json:"Source"`
 	Destination string `json:"Destination"`
+}
+
+// DeviceMapping is a host device passed into a container.
+type DeviceMapping struct {
+	PathOnHost      string `json:"PathOnHost"`
+	PathInContainer string `json:"PathInContainer"`
 }
 
 // EndpointSettings is a container's attachment to one network.
@@ -111,6 +123,8 @@ type TaskTemplate struct {
 // ContainerSpec is the container a Swarm service's tasks run.
 type ContainerSpec struct {
 	Mounts []ServiceMount `json:"Mounts"`
+	// CapabilityAdd are the capabilities added to the default set.
+	CapabilityAdd []string `json:"CapabilityAdd"`
 }
 
 // ServiceMount is a mount of a Swarm service's containers.

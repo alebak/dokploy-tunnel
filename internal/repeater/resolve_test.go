@@ -474,6 +474,9 @@ func TestResolve_RefusesHostLevelTargets(t *testing.T) {
 		{"Docker socket mount", dockertest.Container{Mounts: socket}},
 		{"Docker socket at another path", dockertest.Container{Mounts: []docker.Mount{{Type: "bind", Source: "/run/user/1000/docker.sock", Destination: "/sock/docker.sock"}}}},
 		{"Docker socket bind", dockertest.Container{Binds: []string{"/run/docker.sock:/var/run/docker.sock:ro"}}},
+		{"host root bind", dockertest.Container{Binds: []string{"/:/host:ro"}}},
+		{"run directory mount", dockertest.Container{Mounts: []docker.Mount{{Type: "bind", Source: "/run", Destination: "/host-run"}}}},
+		{"containerd socket bind", dockertest.Container{Binds: []string{"/run/containerd/containerd.sock:/c.sock"}}},
 	}
 	for _, tt := range tests {
 		t.Run("compose "+tt.name, func(t *testing.T) {
@@ -507,8 +510,132 @@ func TestResolve_RefusesHostLevelTargets(t *testing.T) {
 		svc.Spec.TaskTemplate.ContainerSpec.Mounts = []docker.ServiceMount{{Type: "bind", Source: "/var/run/docker.sock", Target: "/var/run/docker.sock"}}
 		swarmService{service: svc, container: "remote", addresses: map[string]string{"net-dokploy": "10.0.1.7/24"}}.add(fake)
 		_, err := newResolver(t, fake).resolve(testContext(t), Target{Kind: KindSwarmService, AppName: "myapp-web"})
-		if !errors.Is(err, ErrTargetUnreachable) || !strings.Contains(err.Error(), "Docker socket") {
+		if !errors.Is(err, ErrTargetUnreachable) || !strings.Contains(err.Error(), "daemon socket") {
 			t.Fatalf("resolve error = %v, want the service refused", err)
 		}
 	})
+	// A task on another node cannot be inspected, so the service's spec
+	// alone must refuse it.
+	specs := []struct {
+		name string
+		spec docker.ContainerSpec
+	}{
+		{"mounting /run", docker.ContainerSpec{Mounts: []docker.ServiceMount{{Type: "bind", Source: "/run", Target: "/host-run"}}}},
+		{"mounting the host root", docker.ContainerSpec{Mounts: []docker.ServiceMount{{Type: "bind", Source: "/", Target: "/host"}}}},
+		{"adding SYS_ADMIN", docker.ContainerSpec{CapabilityAdd: []string{"CAP_SYS_ADMIN"}}},
+		{"adding all capabilities", docker.ContainerSpec{CapabilityAdd: []string{"all"}}},
+	}
+	for _, tt := range specs {
+		t.Run("Swarm service spec "+tt.name, func(t *testing.T) {
+			fake := newFake(t)
+			svc := service("s1", "myapp-web")
+			svc.Spec.TaskTemplate.ContainerSpec = tt.spec
+			swarmService{service: svc, container: "remote", addresses: map[string]string{"net-dokploy": "10.0.1.7/24"}}.add(fake)
+			_, err := newResolver(t, fake).resolve(testContext(t), Target{Kind: KindSwarmService, AppName: "myapp-web"})
+			if !errors.Is(err, ErrTargetUnreachable) || !strings.Contains(err.Error(), "refusing") {
+				t.Fatalf("resolve error = %v, want the service refused", err)
+			}
+		})
+	}
+	t.Run("Swarm service spec with harmless capabilities", func(t *testing.T) {
+		fake := newFake(t)
+		svc := service("s1", "myapp-web")
+		svc.Spec.TaskTemplate.ContainerSpec.CapabilityAdd = []string{"NET_BIND_SERVICE", "CAP_CHOWN"}
+		svc.Spec.TaskTemplate.ContainerSpec.Mounts = []docker.ServiceMount{{Type: "bind", Source: "/srv/app", Target: "/data"}}
+		swarmService{service: svc, container: "remote", addresses: map[string]string{"net-dokploy": "10.0.1.7/24"}}.add(fake)
+		_, err := newResolver(t, fake).resolve(testContext(t), Target{Kind: KindSwarmService, AppName: "myapp-web"})
+		if err != nil && strings.Contains(err.Error(), "refusing") {
+			t.Fatalf("resolve error = %v, want the service accepted", err)
+		}
+	})
+}
+
+func TestMountExposesHost(t *testing.T) {
+	tests := []struct {
+		source string
+		want   bool
+	}{
+		{"/", true},
+		{"/run", true},
+		{"/run/", true},
+		{"/var", true},
+		{"/var/run", true},
+		{"/var/run/docker.sock", true},
+		{"/run/docker.sock", true},
+		{"/run/containerd", true},
+		{"/run/containerd/containerd.sock", true},
+		{"/run/podman/podman.sock", true},
+		{"/var/run/podman", true},
+		{"/home/me/podman.sock", true},
+		{"/srv/app/api.sock", true},
+		{"/run/user", true},
+		{"/run/user/1000", true},
+		{"/run/user/1000/docker.sock", true},
+		{"/run/user/1000/podman", true},
+		{"/var/run/user/1000", true},
+		{"/run/./containerd/../docker.sock", true},
+		{"", false},
+		{"myvolume", false},
+		{"/runner/data", false},
+		{"/run/lock", false},
+		{"/run/users", false},
+		{"/srv/app", false},
+		{"/var/lib/app", false},
+		{"/var/lib/docker/volumes/data/_data", false},
+		{"/etc/ssl/certs", false},
+	}
+	for _, tt := range tests {
+		if got := mountExposesHost(tt.source); got != tt.want {
+			t.Errorf("mountExposesHost(%q) = %v, want %v", tt.source, got, tt.want)
+		}
+	}
+}
+
+func TestUnsafeContainer(t *testing.T) {
+	ctr := func(edit func(*docker.Container)) docker.Container {
+		var c docker.Container
+		edit(&c)
+		return c
+	}
+	tests := []struct {
+		name   string
+		ctr    docker.Container
+		unsafe bool
+	}{
+		{"plain", ctr(func(c *docker.Container) {}), false},
+		{"host PID namespace", ctr(func(c *docker.Container) { c.HostConfig.PidMode = "host" }), true},
+		{"PID namespace of another container", ctr(func(c *docker.Container) { c.HostConfig.PidMode = "container:abc" }), false},
+		{"device", ctr(func(c *docker.Container) {
+			c.HostConfig.Devices = []docker.DeviceMapping{{PathOnHost: "/dev/sda", PathInContainer: "/dev/sda"}}
+		}), true},
+		{"SYS_ADMIN", ctr(func(c *docker.Container) { c.HostConfig.CapAdd = []string{"SYS_ADMIN"} }), true},
+		{"CAP_SYS_PTRACE", ctr(func(c *docker.Container) { c.HostConfig.CapAdd = []string{"CAP_SYS_PTRACE"} }), true},
+		{"lower-case cap_sys_module", ctr(func(c *docker.Container) { c.HostConfig.CapAdd = []string{"cap_sys_module"} }), true},
+		{"SYS_RAWIO", ctr(func(c *docker.Container) { c.HostConfig.CapAdd = []string{"SYS_RAWIO"} }), true},
+		{"DAC_READ_SEARCH", ctr(func(c *docker.Container) { c.HostConfig.CapAdd = []string{"DAC_READ_SEARCH"} }), true},
+		{"NET_ADMIN", ctr(func(c *docker.Container) { c.HostConfig.CapAdd = []string{"NET_ADMIN"} }), true},
+		{"BPF", ctr(func(c *docker.Container) { c.HostConfig.CapAdd = []string{"bpf"} }), true},
+		{"PERFMON", ctr(func(c *docker.Container) { c.HostConfig.CapAdd = []string{"PERFMON"} }), true},
+		{"ALL", ctr(func(c *docker.Container) { c.HostConfig.CapAdd = []string{"CHOWN", "ALL"} }), true},
+		{"harmless capabilities", ctr(func(c *docker.Container) { c.HostConfig.CapAdd = []string{"NET_BIND_SERVICE", "CAP_CHOWN"} }), false},
+		{"bind of /var/run", ctr(func(c *docker.Container) { c.HostConfig.Binds = []string{"/var/run:/host/run:ro"} }), true},
+		{"bind of a rootless runtime dir", ctr(func(c *docker.Container) { c.HostConfig.Binds = []string{"/run/user/1000:/xdg"} }), true},
+		{"mount of the host root", ctr(func(c *docker.Container) {
+			c.Mounts = []docker.Mount{{Type: "bind", Source: "/", Destination: "/host"}}
+		}), true},
+		{"volume holding a socket at a socket path", ctr(func(c *docker.Container) {
+			c.Mounts = []docker.Mount{{Type: "volume", Source: "/var/lib/docker/volumes/dind/_data", Destination: "/var/run/docker.sock"}}
+		}), true},
+		{"safe binds and volumes", ctr(func(c *docker.Container) {
+			c.HostConfig.Binds = []string{"/srv/app:/data", "/runner/data:/runner:ro", "pgdata:/var/lib/postgresql/data"}
+			c.Mounts = []docker.Mount{{Type: "volume", Source: "/var/lib/docker/volumes/pgdata/_data", Destination: "/var/lib/postgresql/data"}}
+		}), false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if why := unsafeContainer(tt.ctr); (why != "") != tt.unsafe {
+				t.Errorf("unsafeContainer() = %q, want unsafe = %v", why, tt.unsafe)
+			}
+		})
+	}
 }
