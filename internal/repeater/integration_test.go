@@ -4,6 +4,10 @@
 // containers, so they only run in the integration workflow
 // (.github/workflows/integration.yml), which prepares the Swarm targets
 // below, and only when DOKTUNNEL_INTEGRATION=1 as a second guard.
+//
+// The repeater reaches Docker at DOCKER_HOST, which the workflow points at
+// doktunnel-socket-proxy for a second run. What the tests set up besides
+// the repeater goes to the daemon directly, as an admin would.
 
 package repeater
 
@@ -35,6 +39,20 @@ const (
 	itClosedService = "doktunnel-it-closed"
 	itPort          = 7000
 )
+
+// adminHost is the runner's Docker daemon, which the tests set up their
+// targets on directly, whatever DOCKER_HOST says.
+const adminHost = docker.DefaultHost
+
+// adminClient talks to the daemon directly.
+func adminClient(t *testing.T) *docker.Client {
+	t.Helper()
+	c, err := docker.New(adminHost)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return c
+}
 
 func integrationClient(t *testing.T) *docker.Client {
 	t.Helper()
@@ -73,6 +91,7 @@ func composeProject(t *testing.T) (appName, dir string) {
 	}
 	compose := func(args ...string) error {
 		cmd := exec.Command("docker", append([]string{"compose", "-p", appName, "-f", file}, args...)...)
+		cmd.Env = append(os.Environ(), "DOCKER_HOST="+adminHost)
 		cmd.Stdout, cmd.Stderr = os.Stderr, os.Stderr
 		return cmd.Run()
 	}
@@ -214,6 +233,8 @@ func TestIntegration_ComposeIgnoresDecoys(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// Decoys are not repeaters: a socket proxy would rightly refuse them.
+	admin := adminClient(t)
 
 	decoy := func(name string, labels map[string]string) {
 		t.Helper()
@@ -225,18 +246,18 @@ func TestIntegration_ComposeIgnoresDecoys(t *testing.T) {
 				NetworkMode: project + "_default",
 			},
 		}
-		id, err := c.CreateContainer(testContext(t), name, cfg)
+		id, err := admin.CreateContainer(testContext(t), name, cfg)
 		if err != nil {
 			t.Fatalf("creating decoy %s: %v", name, err)
 		}
 		t.Cleanup(func() {
 			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 			defer cancel()
-			if err := c.RemoveContainer(ctx, id); err != nil {
+			if err := admin.RemoveContainer(ctx, id); err != nil {
 				t.Errorf("removing decoy %s: %v", name, err)
 			}
 		})
-		if err := c.StartContainer(testContext(t), id); err != nil {
+		if err := admin.StartContainer(testContext(t), id); err != nil {
 			t.Fatalf("starting decoy %s: %v", name, err)
 		}
 	}
