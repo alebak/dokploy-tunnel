@@ -91,32 +91,45 @@ type Client struct {
 	rootDirAt time.Time
 }
 
-// New returns a client for the daemon at host, such as
-// "unix:///var/run/docker.sock" or "tcp://docker-proxy:2375" (plain HTTP,
-// as a socket proxy serves it). An empty host is DefaultHost. Nothing is
-// dialed until the first call.
-func New(host string) (*Client, error) {
+// ParseHost parses a Docker host, such as "unix:///var/run/docker.sock" or
+// "tcp://docker-proxy:2375", into the network ("unix" or "tcp") and address
+// to dial. An empty host is DefaultHost.
+func ParseHost(host string) (network, addr string, err error) {
 	if host == "" {
 		host = DefaultHost
 	}
 	u, err := url.Parse(host)
 	if err != nil {
-		return nil, fmt.Errorf("parsing Docker host %q: %w", host, err)
+		return "", "", fmt.Errorf("parsing Docker host %q: %w", host, err)
 	}
-	var network, addr, base string
 	switch u.Scheme {
 	case "unix":
-		network, addr, base = "unix", u.Path, "http://docker"
-		if addr == "" {
-			return nil, fmt.Errorf("Docker host %q has no socket path", host)
+		if u.Path == "" {
+			return "", "", fmt.Errorf("Docker host %q has no socket path", host)
 		}
+		return "unix", u.Path, nil
 	case "tcp":
 		if u.Port() == "" {
-			return nil, fmt.Errorf("Docker host %q has no port", host)
+			return "", "", fmt.Errorf("Docker host %q has no port", host)
 		}
-		network, addr, base = "tcp", u.Host, "http://"+u.Host
+		return "tcp", u.Host, nil
 	default:
-		return nil, fmt.Errorf("unsupported Docker host %q: use unix:// or tcp://", host)
+		return "", "", fmt.Errorf("unsupported Docker host %q: use unix:// or tcp://", host)
+	}
+}
+
+// New returns a client for the daemon at host, such as
+// "unix:///var/run/docker.sock" or "tcp://docker-proxy:2375" (plain HTTP,
+// as a socket proxy serves it). An empty host is DefaultHost. Nothing is
+// dialed until the first call.
+func New(host string) (*Client, error) {
+	network, addr, err := ParseHost(host)
+	if err != nil {
+		return nil, err
+	}
+	base := "http://docker"
+	if network == "tcp" {
+		base = "http://" + addr
 	}
 
 	dialer := &net.Dialer{Timeout: 10 * time.Second}

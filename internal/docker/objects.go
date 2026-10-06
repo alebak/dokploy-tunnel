@@ -416,7 +416,7 @@ func (c *Client) RemoveContainer(ctx context.Context, id string) error {
 // PullImage pulls ref, such as "alpine/socat:1.8.1.1" or one pinned with
 // "@sha256:...", and waits until the pull ends. A digest wins over a tag.
 func (c *Client) PullImage(ctx context.Context, ref string) error {
-	name, tag := splitReference(ref)
+	name, tag := SplitReference(ref)
 	q := url.Values{"fromImage": {name}, "tag": {tag}}
 	req, err := c.newRequest(ctx, http.MethodPost, "/images/create", q, nil)
 	if err != nil {
@@ -448,9 +448,9 @@ func (c *Client) PullImage(ctx context.Context, ref string) error {
 	return nil
 }
 
-// splitReference splits an image reference into the fromImage and tag
+// SplitReference splits an image reference into the fromImage and tag
 // parameters of a pull: the digest when there is one, else the tag.
-func splitReference(ref string) (name, tag string) {
+func SplitReference(ref string) (name, tag string) {
 	if name, digest, ok := strings.Cut(ref, "@"); ok {
 		if i := strings.LastIndex(name, ":"); i > strings.LastIndex(name, "/") {
 			name = name[:i]
