@@ -6,6 +6,7 @@
 package cli
 
 import (
+	"context"
 	"flag"
 	"io"
 	"net/url"
@@ -115,4 +116,7 @@ type Env struct {
 	Executable func() (string, error)
 	// WriteHosts replaces the hosts file.
 	WriteHosts func(path string, data []byte) error
+	// ProbeCompanion checks that a doktunnel companion answers at a URL;
+	// nil means an HTTP health check.
+	ProbeCompanion func(ctx context.Context, u *url.URL) error
 }

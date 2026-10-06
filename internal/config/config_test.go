@@ -193,3 +193,63 @@ func TestDefaultPath_UsesUserConfigDir(t *testing.T) {
 		t.Errorf("DefaultPath = %q, want %q", got, want)
 	}
 }
+
+func TestLoad_FileWithoutCompanionURL(t *testing.T) {
+	// A file written before contexts stored a companion URL still loads,
+	// with the field empty.
+	path := filepath.Join(t.TempDir(), "config.json")
+	old := `{"version":1,"current_context":"prod","contexts":[{"name":"prod","url":"https://panel.example.com","organization_id":"org1","organization_name":"Acme"}]}`
+	if err := os.WriteFile(path, []byte(old), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	c, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if len(c.Contexts) != 1 || c.Contexts[0] != sample() || c.Contexts[0].CompanionURL != "" {
+		t.Errorf("loaded %+v, want the context with no companion URL", c.Contexts)
+	}
+}
+
+func TestSave_RoundTripCompanionURL(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.json")
+	ctx := sample()
+	ctx.CompanionURL = "https://panel.example.com/doktunnel"
+	c := New()
+	if err := c.Add(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.Save(path); err != nil {
+		t.Fatal(err)
+	}
+	b, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(b), `"companion_url": "https://panel.example.com/doktunnel"`) {
+		t.Errorf("config file does not store companion_url:\n%s", b)
+	}
+	got, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if got.Contexts[0] != ctx {
+		t.Errorf("loaded %+v, want %+v", got.Contexts[0], ctx)
+	}
+}
+
+func TestConfig_SetCompanionURL(t *testing.T) {
+	c := New()
+	if err := c.Add(sample()); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.SetCompanionURL("nope", "https://x/doktunnel"); !errors.Is(err, ErrNotFound) {
+		t.Errorf("SetCompanionURL unknown: err = %v, want ErrNotFound", err)
+	}
+	if err := c.SetCompanionURL("prod", "https://x/doktunnel"); err != nil {
+		t.Fatalf("SetCompanionURL: %v", err)
+	}
+	if got, _ := c.Find("prod"); got.CompanionURL != "https://x/doktunnel" {
+		t.Errorf("companion URL = %q, want https://x/doktunnel", got.CompanionURL)
+	}
+}
