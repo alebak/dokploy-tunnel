@@ -3,7 +3,9 @@ package repeater
 import (
 	"cmp"
 	"context"
+	"crypto/hmac"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/hex"
 	"errors"
 	"fmt"
@@ -53,6 +55,9 @@ const (
 	LabelNetwork = "dev.doktunnel.network"
 	// LabelCreatedAt is the creation time, RFC 3339.
 	LabelCreatedAt = "dev.doktunnel.created-at"
+	// LabelOwnership proves that a companion holding Options.Key created
+	// the repeater: the hex HMAC-SHA256 of its name, keyed by Options.Key.
+	LabelOwnership = "dev.doktunnel.ownership"
 )
 
 // errClosed means the Repeater was closed.
@@ -85,6 +90,11 @@ type Options struct {
 	ReapInterval time.Duration
 	// Owner identifies this process in LabelOwner; random by default.
 	Owner string
+	// Key signs LabelOwnership. The reaper only removes repeaters whose
+	// proof it verifies with Key, so a companion that restarts with the
+	// same Key reaps the repeaters it left behind. Random by default: the
+	// repeaters of an earlier process are then never reaped.
+	Key []byte
 	// MaxRepeaters caps the repeaters running at once;
 	// DefaultMaxRepeaters by default. Idle repeaters are removed early to
 	// make room.
@@ -110,6 +120,9 @@ type Repeater struct {
 	mu      sync.Mutex
 	closed  bool
 	entries map[entryKey]*entry
+	// foreign holds the look-alike repeaters the reaper already logged,
+	// so that each is logged once.
+	foreign map[string]bool
 	// busy tracks creations and background removals, which Close waits
 	// for.
 	busy sync.WaitGroup
@@ -140,13 +153,16 @@ func New(c *docker.Client, opts Options) *Repeater {
 	opts.TTL = cmp.Or(opts.TTL, DefaultTTL)
 	opts.ReapInterval = cmp.Or(opts.ReapInterval, DefaultReapInterval)
 	opts.Owner = cmp.Or(opts.Owner, randomHex(8))
+	if len(opts.Key) == 0 {
+		opts.Key = randomBytes(32)
+	}
 	opts.MaxRepeaters = cmp.Or(opts.MaxRepeaters, DefaultMaxRepeaters)
 	opts.ComposeDir = cmp.Or(opts.ComposeDir, DefaultComposeDir)
 	log := opts.Log
 	if log == nil {
 		log = slog.New(slog.DiscardHandler)
 	}
-	return &Repeater{docker: c, opts: opts, log: log, now: time.Now, reapTimeout: reapTimeout, entries: map[entryKey]*entry{}}
+	return &Repeater{docker: c, opts: opts, log: log, now: time.Now, reapTimeout: reapTimeout, entries: map[entryKey]*entry{}, foreign: map[string]bool{}}
 }
 
 // acquire returns the running repeater for ep, creating it when needed,
@@ -287,6 +303,7 @@ func (r *Repeater) create(ctx context.Context, ep Endpoint) (string, error) {
 		Entrypoint: []string{"sleep"},
 		Cmd:        []string{"infinity"},
 		User:       "65534:65534",
+		// LabelOwnership is added once the name is known.
 		Labels: map[string]string{
 			LabelRepeater:  "1",
 			LabelOwner:     r.opts.Owner,
@@ -307,6 +324,7 @@ func (r *Repeater) create(ctx context.Context, ep Endpoint) (string, error) {
 		},
 	}
 	name := repeaterNamePrefix + randomHex(6)
+	cfg.Labels[LabelOwnership] = ownershipProof(r.opts.Key, name)
 	id, err := r.docker.CreateContainer(ctx, name, cfg)
 	if docker.IsNotFound(err) && strings.Contains(strings.ToLower(err.Error()), "no such image") {
 		if perr := r.docker.PullImage(ctx, r.opts.Image); perr != nil {
@@ -331,14 +349,15 @@ func (r *Repeater) create(ctx context.Context, ep Endpoint) (string, error) {
 	return id, nil
 }
 
-// Reap removes every repeater container this Repeater does not track and
-// that is older than the TTL, running or not, and returns their IDs. One
-// companion per Docker daemon is assumed: another live companion's
-// repeaters would be reaped too.
+// Reap removes every repeater container this Repeater does not track,
+// that is older than the TTL and that a companion holding the same Key
+// created, running or not, and returns their IDs. Repeaters of another
+// companion on the same daemon are reaped too when it shares the Key.
 //
-// The repeater label alone proves nothing, since any container may carry
-// it: a container is only removed when it also has a repeater's name and
-// runs the configured repeater image.
+// The repeater label, name and image prove nothing, since any container
+// may have them: a container is only removed when its LabelOwnership
+// proof verifies with Key. Look-alikes that fail the check are kept and
+// logged once.
 func (r *Repeater) Reap(ctx context.Context) ([]string, error) {
 	found, err := r.docker.ListContainers(ctx, docker.ListOptions{All: true, Labels: []string{LabelRepeater + "=1"}})
 	if err != nil {
@@ -355,8 +374,10 @@ func (r *Repeater) Reap(ctx context.Context) ([]string, error) {
 
 	var removed []string
 	var errs []error
+	listed := map[string]bool{}
 	cutoff := r.now().Add(-r.opts.TTL)
 	for _, c := range found {
+		listed[c.ID] = true
 		if tracked[c.ID] || time.Unix(c.Created, 0).After(cutoff) || !slices.ContainsFunc(c.Names, isRepeaterName) {
 			continue
 		}
@@ -371,13 +392,48 @@ func (r *Repeater) Reap(ctx context.Context) ([]string, error) {
 		if ctr.Config.Image != r.opts.Image || ctr.Config.Labels[LabelRepeater] != "1" || !isRepeaterName(ctr.Name) {
 			continue
 		}
+		if !r.owns(ctr.Name, ctr.Config.Labels[LabelOwnership]) {
+			r.logForeign(c.ID, ctr.Name)
+			continue
+		}
 		if err := r.docker.RemoveContainer(ctx, c.ID); err != nil && !docker.IsNotFound(err) {
 			errs = append(errs, fmt.Errorf("removing orphaned repeater %s: %w", shortID(c.ID), err))
 			continue
 		}
 		removed = append(removed, c.ID)
 	}
+	r.mu.Lock()
+	for id := range r.foreign {
+		if !listed[id] {
+			delete(r.foreign, id)
+		}
+	}
+	r.mu.Unlock()
 	return removed, errors.Join(errs...)
+}
+
+// owns reports whether proof, a LabelOwnership value, proves that a
+// companion holding r's Key created the repeater named name.
+func (r *Repeater) owns(name, proof string) bool {
+	got, err := hex.DecodeString(proof)
+	if err != nil {
+		return false
+	}
+	want, _ := hex.DecodeString(ownershipProof(r.opts.Key, strings.TrimPrefix(name, "/")))
+	return hmac.Equal(got, want)
+}
+
+// logForeign logs, once per container, a look-alike repeater the reaper
+// keeps because this companion did not create it.
+func (r *Repeater) logForeign(id, name string) {
+	r.mu.Lock()
+	logged := r.foreign[id]
+	r.foreign[id] = true
+	r.mu.Unlock()
+	if !logged {
+		r.log.Warn("keeping a look-alike repeater this companion did not create",
+			"container", shortID(id), "name", strings.TrimPrefix(name, "/"))
+	}
 }
 
 // Run reaps orphaned repeaters now and then every ReapInterval until ctx
@@ -450,8 +506,20 @@ func shortID(id string) string {
 	return id[:min(len(id), 12)]
 }
 
-func randomHex(n int) string {
+// ownershipProof is the LabelOwnership value of the repeater named name,
+// without a leading slash, for key.
+func ownershipProof(key []byte, name string) string {
+	mac := hmac.New(sha256.New, key)
+	mac.Write([]byte(name))
+	return hex.EncodeToString(mac.Sum(nil))
+}
+
+func randomBytes(n int) []byte {
 	b := make([]byte, n)
 	_, _ = rand.Read(b)
-	return hex.EncodeToString(b)
+	return b
+}
+
+func randomHex(n int) string {
+	return hex.EncodeToString(randomBytes(n))
 }

@@ -106,7 +106,12 @@ func NewBridge(ctx context.Context, cfg Config, log *slog.Logger) (Bridge, func(
 	if err := client.Ping(ctx); err != nil {
 		return nil, nil, fmt.Errorf("reaching Docker at %s: %w", cfg.DockerHost, err)
 	}
+	key, err := repeaterKey(cfg.RepeaterKeyFile, log)
+	if err != nil {
+		return nil, nil, err
+	}
 	b := NewDockerBridge(client, repeater.Options{
+		Key:          key,
 		Image:        cfg.RepeaterImage,
 		Grace:        cfg.RepeaterGrace,
 		TTL:          cfg.ReaperTTL,

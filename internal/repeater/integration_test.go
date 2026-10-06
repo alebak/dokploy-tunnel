@@ -303,8 +303,9 @@ func TestIntegration_ReaperRemovesAbandonedRepeaters(t *testing.T) {
 	c := integrationClient(t)
 	project, dir := composeProject(t)
 	// A companion that dies with a tunnel open: its Repeater is never
-	// closed.
-	crashed := New(c, Options{Grace: time.Hour, ComposeDir: dir, Log: slog.New(slog.DiscardHandler)})
+	// closed. Restarted, it holds the same key.
+	key := randomBytes(32)
+	crashed := New(c, Options{Grace: time.Hour, ComposeDir: dir, Key: key, Log: slog.New(slog.DiscardHandler)})
 	s, err := crashed.Open(testContext(t), Target{Kind: KindCompose, AppName: project, Service: "echo", Port: itPort})
 	if err != nil {
 		t.Fatalf("Open: %v", err)
@@ -315,7 +316,7 @@ func TestIntegration_ReaperRemovesAbandonedRepeaters(t *testing.T) {
 	}
 
 	time.Sleep(1100 * time.Millisecond) // Created has a resolution of one second.
-	next := integrationRepeater(t, c, Options{TTL: time.Second})
+	next := integrationRepeater(t, c, Options{TTL: time.Second, Key: key})
 	removed, err := next.Reap(testContext(t))
 	if err != nil || len(removed) != 1 {
 		t.Fatalf("Reap = %v, %v; want the abandoned repeater", removed, err)
