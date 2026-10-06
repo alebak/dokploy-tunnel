@@ -273,7 +273,7 @@ The companion serves plain HTTP. Put it behind a TLS-terminating proxy, such as 
 Docker networks are segmented, so the companion never joins tenant networks itself. With the `docker` bridge it talks to the Docker Engine API (the companion exits at startup if Docker does not answer) and, for each target, runs one idle **repeater** container from a small socat image:
 
 - The target is found from sources tied to the service Dokploy authorized, never from names or labels another tenant could copy. Applications, databases and services of `stack` deployments are Swarm services: the companion inspects the service by its exact name (`<appName>`, or `<appName>_<service>` with `com.docker.stack.namespace=<appName>` on the service) and takes a running task's container, networks and addresses from the Swarm API. Services of `docker-compose` stacks are found by their `com.docker.compose.project` and `com.docker.compose.service` labels, which Compose sets itself, and only accepted when their project directory is Dokploy's for that appName (`/etc/dokploy/compose/<appName>`). Containers carrying any `com.docker.swarm.*` label are refused there, and containers that match but disagree on their project or networks make the tunnel fail rather than guess.
-- Some targets are refused with `target_unreachable`: appNames `dokploy` and `dokploy-*`, which Dokploy's own services use while users may pick such names too, and containers that run privileged, on the host network, or with the Docker socket mounted.
+- Some targets are refused with `target_unreachable`: appNames `dokploy` and `dokploy-*`, which Dokploy's own services use while users may pick such names too, and containers that run privileged, on the host network or in the host PID namespace, with host devices or dangerous added capabilities, or with a daemon socket (or a directory that may hold one) mounted.
 - The repeater joins exactly one of the target's own networks, preferring the stack's own network over custom networks over `dokploy-network`. It listens on no port, runs as `nobody` with no capabilities, a read-only root filesystem, an init, and limits of 256 processes and 64 MiB of memory, and is labeled `dev.doktunnel.repeater=1`. A target reachable only on overlay networks that are not attachable is refused with `network_not_attachable`.
 - Every tunnel runs `socat STDIO TCP:<ip>:<port>` in the repeater through `docker exec`, dialing the address Docker reports for the target on that network, so no DNS name is involved.
 - Concurrent tunnels to one target share its repeater, which is removed when the last tunnel has been closed for the grace period. Repeaters left behind by a stopped companion are removed at startup and every minute once older than the reaper TTL; only containers with the repeater label, a `doktunnel-repeater-` name and the configured repeater image are removed, without their volumes. One companion per Docker daemon is assumed.
@@ -287,6 +287,34 @@ The companion holds no credentials and keeps no permissions of its own. Every tu
 **Read access to a service is enough to forward to it.** Dokploy's own container terminal, which opens a root shell inside the container, only requires read access to the service (`canAccessDockerOverWss` in Dokploy's `apps/dokploy/server/wss/authorize.ts`). A TCP tunnel grants less than a shell, so requiring more would be stricter than Dokploy without a real security gain. Owner and admin keys can forward to every service in their organization; member keys only to the services they were granted.
 
 Invalid keys, keys of another organization, services the key cannot read, and services that do not exist are all rejected alike, with `permission_denied`, before anything else happens. A companion only forwards to services deployed on its own Dokploy server and refuses others with `wrong_server`, naming the server the service runs on.
+
+### Trust model
+
+**doktunnel's isolation between tenants is bounded by Dokploy's.** Anyone who can edit a Dokploy compose service can already control the host's Docker daemon, so the companion cannot protect a server from them. Grant compose edit permissions only to users you would trust with root on that server.
+
+What the companion verifies for every tunnel:
+
+| Check | What it guarantees |
+|-------|--------------------|
+| Dokploy authorization | The caller's API key can read the target service, checked against Dokploy on every tunnel request (see [Security and permissions](#security-and-permissions)). |
+| Authoritative target resolution | Swarm targets come from the Swarm API by exact service name. Compose targets must carry Compose's own `com.docker.compose.project` and `com.docker.compose.service` labels, no `com.docker.swarm.*` label, and a project directory (or compose files) under `/etc/dokploy/compose/<appName>`. |
+| Reserved names | AppNames `dokploy` and `dokploy-*` are refused, so a tunnel cannot reach Dokploy's own panel, database, cache or proxy. |
+| Unsafe targets | Containers that run privileged, use the host's network or PID namespace, are given host devices, add capabilities that reach past the container, or mount a daemon socket (or a directory that may hold one) are refused. |
+| Dialing | The repeater dials the IP address the Docker daemon reports for the target, never a DNS name. |
+| Resource limits | Repeaters run as `nobody` with no capabilities, a read-only root filesystem and limits of 256 processes and 64 MiB; tunnels are capped globally and per API key. |
+
+The compose check relies on two facts that hold under Dokploy's default deployment:
+
+- Docker Compose sets `com.docker.compose.project`, `service`, `working_dir` and `config_files` itself ([`pkg/compose/loader.go`](https://github.com/docker/compose/blob/main/pkg/compose/loader.go)) and merges them over the service's own labels ([`pkg/compose/executor_ops.go`](https://github.com/docker/compose/blob/main/pkg/compose/executor_ops.go)), so a compose file cannot forge them.
+- Dokploy deploys a compose service with `docker compose -p <appName> --project-directory <path> ... up -d --build --remove-orphans` ([`packages/server/src/utils/builders/compose.ts`](https://github.com/Dokploy/dokploy/blob/canary/packages/server/src/utils/builders/compose.ts)).
+
+**Dokploy's custom compose command breaks both.** A compose service can replace the default command with its own. Dokploy only rejects shell metacharacters in it (`sanitizeCommand` in the same file) and runs it as `docker <command>`. A user who can edit that field can therefore deploy under another project name or directory, or run any `docker` command, such as a privileged container with the host's root filesystem mounted. No check in the companion can stop that, because the user never needed a tunnel to reach the host.
+
+Known limitations being worked on:
+
+- [#60](https://github.com/alebak/dokploy-tunnel/issues/60): remaining unsafe-target gaps in repeater resolution.
+- [#61](https://github.com/alebak/dokploy-tunnel/issues/61): repeater dials are bound to the target's IP, not to the target container.
+- [#62](https://github.com/alebak/dokploy-tunnel/issues/62): the reaper should remove only repeater containers the companion created.
 
 ## Releases and versioning
 
