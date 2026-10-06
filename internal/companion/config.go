@@ -20,13 +20,14 @@ const (
 	EnvDokployURL = "DOKTUNNEL_COMPANION_DOKPLOY_URL"
 	EnvServerID   = "DOKTUNNEL_COMPANION_SERVER_ID"
 
-	EnvBridge        = "DOKTUNNEL_COMPANION_BRIDGE"
-	EnvRepeaterImage = "DOKTUNNEL_COMPANION_REPEATER_IMAGE"
-	EnvRepeaterGrace = "DOKTUNNEL_COMPANION_REPEATER_GRACE"
-	EnvReaperTTL     = "DOKTUNNEL_COMPANION_REAPER_TTL"
-	EnvMaxTunnels    = "DOKTUNNEL_COMPANION_MAX_TUNNELS"
-	EnvMaxPerKey     = "DOKTUNNEL_COMPANION_MAX_TUNNELS_PER_KEY"
-	EnvMaxRepeaters  = "DOKTUNNEL_COMPANION_MAX_REPEATERS"
+	EnvBridge          = "DOKTUNNEL_COMPANION_BRIDGE"
+	EnvRepeaterImage   = "DOKTUNNEL_COMPANION_REPEATER_IMAGE"
+	EnvRepeaterGrace   = "DOKTUNNEL_COMPANION_REPEATER_GRACE"
+	EnvReaperTTL       = "DOKTUNNEL_COMPANION_REAPER_TTL"
+	EnvMaxTunnels      = "DOKTUNNEL_COMPANION_MAX_TUNNELS"
+	EnvMaxPerKey       = "DOKTUNNEL_COMPANION_MAX_TUNNELS_PER_KEY"
+	EnvMaxRepeaters    = "DOKTUNNEL_COMPANION_MAX_REPEATERS"
+	EnvRepeaterKeyFile = "DOKTUNNEL_COMPANION_REPEATER_KEY_FILE"
 	// EnvDockerHost is Docker's own variable, so the companion finds the
 	// daemon the way the docker CLI does.
 	EnvDockerHost = "DOCKER_HOST"
@@ -72,6 +73,9 @@ type Config struct {
 	MaxTunnelsPerKey int
 	// MaxRepeaters caps the repeater containers running at once.
 	MaxRepeaters int
+	// RepeaterKeyFile holds the key that proves which repeaters the
+	// companion created; empty for the default location.
+	RepeaterKeyFile string
 }
 
 // ParseConfig reads the configuration from the command-line arguments args
@@ -102,6 +106,8 @@ func ParseConfig(args []string, getenv func(string) string, usage io.Writer) (Co
 		"`number` of tunnels one API key may have open at once (env "+EnvMaxPerKey+")")
 	maxRepeaters := fs.String("max-repeaters", orDefault(getenv(EnvMaxRepeaters), strconv.Itoa(repeater.DefaultMaxRepeaters)),
 		"`number` of repeater containers running at once (env "+EnvMaxRepeaters+")")
+	keyFile := fs.String("repeater-key-file", getenv(EnvRepeaterKeyFile),
+		"`file` holding the key that proves which repeaters this companion created, generated if missing; empty for doktunnel-companion/repeater.key in the user's configuration directory (env "+EnvRepeaterKeyFile+")")
 	version := fs.Bool("version", false, "print the version and exit")
 	if err := fs.Parse(args); err != nil {
 		return Config{}, err
@@ -139,7 +145,7 @@ func ParseConfig(args []string, getenv func(string) string, usage io.Writer) (Co
 	if _, err := docker.New(*dockerHost); err != nil {
 		return Config{}, fmt.Errorf("--docker-host: %w", err)
 	}
-	cfg.DockerHost, cfg.RepeaterImage = *dockerHost, *image
+	cfg.DockerHost, cfg.RepeaterImage, cfg.RepeaterKeyFile = *dockerHost, *image, *keyFile
 	if cfg.RepeaterGrace, err = positiveDuration("--repeater-grace", *grace); err != nil {
 		return Config{}, err
 	}

@@ -1,6 +1,7 @@
 package repeater
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"log/slog"
@@ -18,6 +19,9 @@ import (
 )
 
 const testImage = "alpine/socat:test"
+
+// testKey is the ownership key of the companion under test.
+var testKey = []byte("0123456789abcdef0123456789abcdef")
 
 // endpointOn is a target at addr on n.
 func endpointOn(n docker.Network, addr string) Endpoint {
@@ -37,6 +41,9 @@ func newRepeater(t *testing.T, fake *dockertest.Fake, opts Options) *Repeater {
 	}
 	if opts.Log == nil {
 		opts.Log = slog.New(slog.DiscardHandler)
+	}
+	if opts.Key == nil {
+		opts.Key = testKey
 	}
 	r := New(newClient(t, fake), opts)
 	t.Cleanup(func() { _ = r.Close(testContext(t)) })
@@ -101,6 +108,9 @@ func TestAcquire_CreatesAHardenedLabeledRepeater(t *testing.T) {
 	}
 	if _, err := time.Parse(time.RFC3339, cfg.Labels[LabelCreatedAt]); err != nil {
 		t.Errorf("label %s = %q: %v", LabelCreatedAt, cfg.Labels[LabelCreatedAt], err)
+	}
+	if want := ownershipProof(testKey, strings.TrimPrefix(c.Name, "/")); cfg.Labels[LabelOwnership] != want {
+		t.Errorf("label %s = %q, want the proof %q for name %s", LabelOwnership, cfg.Labels[LabelOwnership], want, c.Name)
 	}
 }
 
@@ -253,28 +263,48 @@ func TestClose_RemovesEveryRepeater(t *testing.T) {
 	}
 }
 
-// orphan is a repeater container no live companion tracks.
-func orphan(id string, created time.Time) dockertest.Container {
-	return dockertest.Container{ID: id, Name: repeaterNamePrefix + id, Image: testImage, Running: true, Created: created,
-		Labels: map[string]string{LabelRepeater: "1", LabelOwner: "dead-companion"}}
+// orphan is a repeater container a companion holding key created and no
+// live companion tracks.
+func orphan(key []byte, id string, created time.Time) dockertest.Container {
+	name := repeaterNamePrefix + id
+	return dockertest.Container{ID: id, Name: name, Image: testImage, Running: true, Created: created,
+		Labels: map[string]string{LabelRepeater: "1", LabelOwner: "dead-companion", LabelOwnership: ownershipProof(key, name)}}
+}
+
+// syncBuffer is a bytes.Buffer safe for concurrent use, for logs.
+type syncBuffer struct {
+	mu sync.Mutex
+	b  bytes.Buffer
+}
+
+func (b *syncBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.b.Write(p)
+}
+
+func (b *syncBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.b.String()
 }
 
 func TestReap(t *testing.T) {
 	fake := newFake(t)
 	fake.AddImage(testImage)
 	old := time.Now().Add(-time.Hour)
-	fake.AddContainer(orphan("orphan-running", old))
-	exited := orphan("orphan-exited", old)
+	fake.AddContainer(orphan(testKey, "orphan-running", old))
+	exited := orphan(testKey, "orphan-exited", old)
 	exited.Running = false
 	fake.AddContainer(exited)
-	fake.AddContainer(orphan("recent-orphan", time.Now()))
+	fake.AddContainer(orphan(testKey, "recent-orphan", time.Now()))
 	fake.AddContainer(dockertest.Container{ID: "unrelated", Name: "u", Running: true, Created: old, Labels: map[string]string{"app": "x"}})
 	// Containers anyone could label as repeaters are kept unless they
 	// also have a repeater's name and image.
-	wrongName := orphan("wrong-name", old)
+	wrongName := orphan(testKey, "wrong-name", old)
 	wrongName.Name = "tenant-db"
 	fake.AddContainer(wrongName)
-	wrongImage := orphan("wrong-image", old)
+	wrongImage := orphan(testKey, "wrong-image", old)
 	wrongImage.Image = "postgres:16"
 	fake.AddContainer(wrongImage)
 
@@ -287,7 +317,7 @@ func TestReap(t *testing.T) {
 	// Two hours later, even the recent orphan is past the TTL; the tracked
 	// repeater is kept however old it is.
 	r.now = func() time.Time { return time.Now().Add(2 * time.Hour) }
-	fake.AddContainer(orphan("young-later", time.Now().Add(2*time.Hour)))
+	fake.AddContainer(orphan(testKey, "young-later", time.Now().Add(2*time.Hour)))
 
 	removed, err := r.Reap(testContext(t))
 	if err != nil {
@@ -304,6 +334,92 @@ func TestReap(t *testing.T) {
 	}
 	if n := fake.VolumeRemovals(); n != 0 {
 		t.Errorf("%d removals also removed volumes", n)
+	}
+}
+
+func TestReap_SkipsLookAlikesItDidNotCreate(t *testing.T) {
+	fake := newFake(t)
+	fake.AddImage(testImage)
+	old := time.Now().Add(-time.Hour)
+	genuine := orphan(testKey, "genuine", old)
+	fake.AddContainer(genuine)
+
+	// Look-alikes a tenant could create: a repeater's label, name and
+	// image, but no proof of ownership, a proof made with another key, or
+	// the genuine orphan's proof copied onto another name.
+	unsigned := orphan(testKey, "unsigned", old)
+	delete(unsigned.Labels, LabelOwnership)
+	forged := orphan([]byte("a key the tenant guessed, 32 b.."), "forged", old)
+	copied := orphan(testKey, "copied", old)
+	copied.Labels[LabelOwnership] = genuine.Labels[LabelOwnership]
+	malformed := orphan(testKey, "malformed", old)
+	malformed.Labels[LabelOwnership] = "not hex"
+	lookAlikes := []dockertest.Container{unsigned, forged, copied, malformed}
+	for _, c := range lookAlikes {
+		fake.AddContainer(c)
+	}
+
+	logs := &syncBuffer{}
+	r := newRepeater(t, fake, Options{TTL: time.Minute, Log: slog.New(slog.NewTextHandler(logs, nil))})
+	for range 2 {
+		removed, err := r.Reap(testContext(t))
+		if err != nil {
+			t.Fatalf("Reap: %v", err)
+		}
+		if len(removed) > 1 || (len(removed) == 1 && removed[0] != "genuine") {
+			t.Fatalf("reaped %q, want only the genuine orphan", removed)
+		}
+	}
+	if _, ok := fake.Container("genuine"); ok {
+		t.Error("the genuine orphan was not reaped")
+	}
+	for _, c := range lookAlikes {
+		if _, ok := fake.Container(c.ID); !ok {
+			t.Errorf("look-alike %s was reaped", c.ID)
+		}
+		// Each is logged once, not on every pass.
+		if n := strings.Count(logs.String(), "container="+c.ID+" "); n != 1 {
+			t.Errorf("look-alike %s logged %d times, want once:\n%s", c.ID, n, logs)
+		}
+	}
+}
+
+func TestReap_AfterARestartReapsOnlyItsOwnOrphans(t *testing.T) {
+	fake := newFake(t)
+	fake.AddImage(testImage)
+	// A companion that dies with a tunnel open: its Repeater is never
+	// closed.
+	crashed := New(newClient(t, fake), Options{Image: testImage, Key: testKey, Grace: time.Hour, Log: slog.New(slog.DiscardHandler)})
+	abandoned, _, err := crashed.acquire(testContext(t), endpointOn(composeDefault, pgAddr))
+	if err != nil {
+		t.Fatal(err)
+	}
+	later := func() time.Time { return time.Now().Add(time.Hour) }
+
+	// Another installation, with another key, does not own it.
+	stranger := newRepeater(t, fake, Options{TTL: time.Minute, Key: []byte("another installation's key, 32 b")})
+	stranger.now = later
+	if removed, err := stranger.Reap(testContext(t)); err != nil || len(removed) != 0 {
+		t.Fatalf("Reap with another key = %q, %v; want nothing", removed, err)
+	}
+
+	// The restarted companion holds the same key and reaps it.
+	restarted := newRepeater(t, fake, Options{TTL: time.Minute})
+	restarted.now = later
+	removed, err := restarted.Reap(testContext(t))
+	if err != nil || !slices.Equal(removed, []string{abandoned}) {
+		t.Fatalf("Reap after a restart = %q, %v; want the abandoned repeater %s", removed, err, abandoned)
+	}
+}
+
+func TestNew_WithoutAKeyOwnsOnlyItsOwnRepeaters(t *testing.T) {
+	fake := newFake(t)
+	fake.AddImage(testImage)
+	fake.AddContainer(orphan(testKey, "orphan", time.Now().Add(-time.Hour)))
+	r := New(newClient(t, fake), Options{Image: testImage, TTL: time.Minute, Log: slog.New(slog.DiscardHandler)})
+	t.Cleanup(func() { _ = r.Close(testContext(t)) })
+	if removed, err := r.Reap(testContext(t)); err != nil || len(removed) != 0 {
+		t.Errorf("Reap with a random key = %q, %v; want nothing", removed, err)
 	}
 }
 
@@ -357,7 +473,7 @@ func TestAcquire_CapsRepeaters(t *testing.T) {
 
 func TestRun_ReapsAtStartup(t *testing.T) {
 	fake := newFake(t)
-	fake.AddContainer(orphan("orphan", time.Now().Add(-time.Hour)))
+	fake.AddContainer(orphan(testKey, "orphan", time.Now().Add(-time.Hour)))
 	r := newRepeater(t, fake, Options{TTL: time.Minute, ReapInterval: time.Hour})
 	ctx, cancel := context.WithCancel(testContext(t))
 	done := make(chan struct{})

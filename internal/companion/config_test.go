@@ -137,20 +137,21 @@ func TestParseConfig_Docker(t *testing.T) {
 			map[string]string{
 				EnvBridge: "none", EnvDockerHost: "tcp://docker-proxy:2375", EnvRepeaterImage: "registry.example.com/socat:1",
 				EnvRepeaterGrace: "5s", EnvReaperTTL: "10m",
-				EnvMaxTunnels: "100", EnvMaxPerKey: "10", EnvMaxRepeaters: "20",
+				EnvMaxTunnels: "100", EnvMaxPerKey: "10", EnvMaxRepeaters: "20", EnvRepeaterKeyFile: "/var/lib/doktunnel/key",
 			},
 			Config{Bridge: BridgeNone, DockerHost: "tcp://docker-proxy:2375", RepeaterImage: "registry.example.com/socat:1",
 				RepeaterGrace: 5 * time.Second, ReaperTTL: 10 * time.Minute,
-				MaxTunnels: 100, MaxTunnelsPerKey: 10, MaxRepeaters: 20},
+				MaxTunnels: 100, MaxTunnelsPerKey: 10, MaxRepeaters: 20, RepeaterKeyFile: "/var/lib/doktunnel/key"},
 		},
 		{
 			"flags win",
 			[]string{"--bridge", "docker", "--docker-host", "unix:///run/docker.sock", "--repeater-image", "socat:2",
-				"--repeater-grace", "1m", "--reaper-ttl", "2m", "--max-tunnels", "8", "--max-tunnels-per-key", "4", "--max-repeaters", "2"},
-			map[string]string{EnvBridge: "none", EnvDockerHost: "tcp://docker-proxy:2375", EnvMaxTunnels: "100"},
+				"--repeater-grace", "1m", "--reaper-ttl", "2m", "--max-tunnels", "8", "--max-tunnels-per-key", "4", "--max-repeaters", "2",
+				"--repeater-key-file", "/data/key"},
+			map[string]string{EnvBridge: "none", EnvDockerHost: "tcp://docker-proxy:2375", EnvMaxTunnels: "100", EnvRepeaterKeyFile: "/env/key"},
 			Config{Bridge: BridgeDocker, DockerHost: "unix:///run/docker.sock", RepeaterImage: "socat:2",
 				RepeaterGrace: time.Minute, ReaperTTL: 2 * time.Minute,
-				MaxTunnels: 8, MaxTunnelsPerKey: 4, MaxRepeaters: 2},
+				MaxTunnels: 8, MaxTunnelsPerKey: 4, MaxRepeaters: 2, RepeaterKeyFile: "/data/key"},
 		},
 	}
 	for _, tt := range tests {
@@ -165,7 +166,8 @@ func TestParseConfig_Docker(t *testing.T) {
 			}
 			if got.Bridge != tt.want.Bridge || got.DockerHost != tt.want.DockerHost || got.RepeaterImage != tt.want.RepeaterImage ||
 				got.RepeaterGrace != tt.want.RepeaterGrace || got.ReaperTTL != tt.want.ReaperTTL ||
-				got.MaxTunnels != tt.want.MaxTunnels || got.MaxTunnelsPerKey != tt.want.MaxTunnelsPerKey || got.MaxRepeaters != tt.want.MaxRepeaters {
+				got.MaxTunnels != tt.want.MaxTunnels || got.MaxTunnelsPerKey != tt.want.MaxTunnelsPerKey || got.MaxRepeaters != tt.want.MaxRepeaters ||
+				got.RepeaterKeyFile != tt.want.RepeaterKeyFile {
 				t.Errorf("ParseConfig = %+v, want %+v", got, tt.want)
 			}
 		})
