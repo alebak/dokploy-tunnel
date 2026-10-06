@@ -119,6 +119,9 @@ type Endpoint struct {
 	// ContainerID is the target container that was inspected; empty when
 	// the Swarm task runs on another node.
 	ContainerID string
+	// TaskID is the Swarm task found for the target; empty for a
+	// docker-compose service.
+	TaskID string
 	// ExposedPorts are the ports the target's image exposes, sorted. They
 	// are unknown, and empty, without a local container.
 	ExposedPorts []Port
@@ -281,7 +284,7 @@ func (rs resolver) locateSwarm(ctx context.Context, t Target) (located, error) {
 	slices.SortFunc(tasks, func(a, b docker.Task) int { return cmp.Compare(a.ID, b.ID) })
 	task := tasks[0]
 
-	var loc located
+	loc := located{ep: Endpoint{TaskID: task.ID}}
 	if id := task.Status.ContainerStatus.ContainerID; id != "" {
 		// The container is only inspectable on the node running it.
 		ctr, err := rs.docker.InspectContainer(ctx, id)

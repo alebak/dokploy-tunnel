@@ -265,6 +265,29 @@ func TestClient_ListTasks_Filters(t *testing.T) {
 	}
 }
 
+func TestClient_InspectTask(t *testing.T) {
+	fake := dockertest.New(t)
+	task := docker.Task{ID: "t1", ServiceID: "s1"}
+	att := docker.TaskNetwork{Addresses: []string{"10.0.1.7/24"}}
+	att.Network.ID = "net1"
+	task.NetworksAttachments = []docker.TaskNetwork{att}
+	fake.AddTask(task)
+	c := newClient(t, fake)
+	ctx := testContext(t)
+
+	got, err := c.InspectTask(ctx, "t1")
+	if err != nil || got.ID != "t1" || got.Status.State != "running" || got.NetworksAttachments[0].Addresses[0] != "10.0.1.7/24" {
+		t.Errorf("InspectTask = %+v, %v, want running task t1 with its attachment", got, err)
+	}
+	fake.SetTaskState("t1", "shutdown")
+	if got, err := c.InspectTask(ctx, "t1"); err != nil || got.Status.State != "shutdown" {
+		t.Errorf("InspectTask after it ended = %+v, %v, want state shutdown", got, err)
+	}
+	if _, err := c.InspectTask(ctx, "t2"); !docker.IsNotFound(err) {
+		t.Errorf("InspectTask missing: error = %v, want not found", err)
+	}
+}
+
 func TestClient_PullImage_StreamError(t *testing.T) {
 	fake := dockertest.New(t)
 	fake.PullError = "manifest unknown"

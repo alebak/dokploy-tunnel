@@ -35,8 +35,9 @@ type Stream struct {
 
 // Open connects to t through its repeater, creating the repeater when no
 // stream to t is open, and returns the connected stream. ctx bounds
-// opening only. It fails with ErrTargetUnreachable, a *NotAttachableError,
-// or ctx's error.
+// opening only. It fails with ErrTargetUnreachable, also when the target
+// stopped or changed while connecting, a *NotAttachableError, or ctx's
+// error.
 func (r *Repeater) Open(ctx context.Context, t Target) (*Stream, error) {
 	if t.Port < 1 || t.Port > 65535 {
 		return nil, fmt.Errorf("%w: invalid port %d", ErrTargetUnreachable, t.Port)
@@ -57,6 +58,13 @@ func (r *Repeater) Open(ctx context.Context, t Target) (*Stream, error) {
 		if err != nil {
 			return nil, err
 		}
+		// The target is pinned as late as possible before the dial, and
+		// checked again once connected (see identity.go).
+		pinned, err := r.observe(ctx, ep)
+		if err != nil {
+			release()
+			return nil, err
+		}
 		ex, err := r.docker.Exec(ctx, id, cmd, nil)
 		if (docker.IsNotFound(err) || docker.IsConflict(err)) && attempt == 0 {
 			r.log.Warn("repeater gone, replacing it", "container", shortID(id), "error", err)
@@ -71,6 +79,17 @@ func (r *Repeater) Open(ctx context.Context, t Target) (*Stream, error) {
 		s := &Stream{exec: ex, release: release}
 		if err := s.waitConnected(ctx); err != nil {
 			s.Close()
+			return nil, err
+		}
+		now, err := r.observe(ctx, ep)
+		if err == nil && now != pinned {
+			err = fmt.Errorf("%w: %s: it restarted or reconnected to %s", ErrTargetUnreachable, errTargetChanged, ep.Network.Name)
+		}
+		if err != nil {
+			// Nothing has crossed yet: the client has not written, and
+			// bytes the peer sent are dropped with the stream.
+			s.Close()
+			r.log.Warn("closed a tunnel whose target changed while connecting", "target", ep.Name, "error", err)
 			return nil, err
 		}
 		return s, nil
