@@ -785,3 +785,31 @@ func TestUnsafeContainer(t *testing.T) {
 		})
 	}
 }
+
+func TestHostSysctl(t *testing.T) {
+	tests := []struct {
+		name string
+		key  string
+		host bool
+	}{
+		{"IPC parameter", "kernel.shmmax", false},
+		{"message queue parameter", "fs.mqueue.msg_max", false},
+		{"network parameter", "net.core.somaxconn", false},
+		{"UTS domain name", "kernel.domainname", false},
+		{"user namespace counter", "user.max_user_namespaces", false},
+		{"slash-separated network parameter", "net/ipv4/ip_forward", false},
+		{"slash-separated IPC parameter", "kernel/shmmax", false},
+		{"host-wide kernel parameter", "kernel.panic", true},
+		{"slash-separated host-wide parameter", "kernel/panic", true},
+		{"vm parameter", "vm.overcommit_memory", true},
+		{"hostname, which runc refuses", "kernel.hostname", true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := hostSysctl(map[string]string{tt.key: "1"}) != ""
+			if got != tt.host {
+				t.Errorf("hostSysctl(%q) reported host-wide = %v, want %v", tt.key, got, tt.host)
+			}
+		})
+	}
+}

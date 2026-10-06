@@ -633,16 +633,42 @@ var ipcSysctls = []string{
 }
 
 // hostSysctl returns the first of sysctls, sorted, that is not scoped to
-// the container's own namespaces, or "". IPC and fs.mqueue parameters are
-// scoped to the IPC namespace and net ones to the network namespace;
-// sharing the host's namespaces is refused separately.
+// the container's own namespaces, or "". It follows runc's validation: IPC
+// and fs.mqueue parameters are scoped to the IPC namespace, net ones to the
+// network namespace, kernel.domainname to the UTS namespace and user ones
+// to the user namespace; sharing the host's namespaces is refused
+// separately.
 func hostSysctl(sysctls map[string]string) string {
 	for _, k := range slices.Sorted(maps.Keys(sysctls)) {
-		if !slices.Contains(ipcSysctls, k) && !strings.HasPrefix(k, "fs.mqueue.") && !strings.HasPrefix(k, "net.") {
+		if !namespacedSysctl(sysctlDots(k)) {
 			return k
 		}
 	}
 	return ""
+}
+
+func namespacedSysctl(k string) bool {
+	return slices.Contains(ipcSysctls, k) || k == "kernel.domainname" ||
+		strings.HasPrefix(k, "fs.mqueue.") || strings.HasPrefix(k, "net.") ||
+		strings.HasPrefix(k, "user.")
+}
+
+// sysctlDots converts a slash-separated sysctl name such as
+// net/ipv4/ip_forward to its dotted form, swapping any dots in it for
+// slashes, as runc does.
+func sysctlDots(k string) string {
+	if i := strings.IndexAny(k, "./"); i < 0 || k[i] == '.' {
+		return k
+	}
+	return strings.Map(func(r rune) rune {
+		switch r {
+		case '/':
+			return '.'
+		case '.':
+			return '/'
+		}
+		return r
+	}, k)
 }
 
 // isSocketPath reports whether p names a Unix socket by convention.
