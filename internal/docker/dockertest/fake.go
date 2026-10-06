@@ -55,6 +55,12 @@ type Container struct {
 	SecurityOpt   []string
 	MaskedPaths   []string
 	ReadonlyPaths []string
+	// User, CapAdd, CapDrop and ReadonlyRootfs are reported in the
+	// container's inspection.
+	User           string
+	CapAdd         []string
+	CapDrop        []string
+	ReadonlyRootfs bool
 }
 
 // ExecConfig is an exec the fake daemon was asked to create.
@@ -166,6 +172,10 @@ func (f *Fake) AddContainer(c Container) {
 	dc.HostConfig.SecurityOpt = c.SecurityOpt
 	dc.HostConfig.MaskedPaths = c.MaskedPaths
 	dc.HostConfig.ReadonlyPaths = c.ReadonlyPaths
+	dc.Config.User = c.User
+	dc.HostConfig.CapAdd = c.CapAdd
+	dc.HostConfig.CapDrop = c.CapDrop
+	dc.HostConfig.ReadonlyRootfs = c.ReadonlyRootfs
 	dc.Mounts = c.Mounts
 	dc.NetworkSettings.Networks = map[string]docker.EndpointSettings{}
 	for name, aliases := range c.Networks {
@@ -556,6 +566,11 @@ func (f *Fake) createContainer(w http.ResponseWriter, r *http.Request) {
 	c.State.Status = "created"
 	c.Config.Image = cfg.Image
 	c.Config.Labels = cfg.Labels
+	c.Config.User = cfg.User
+	c.HostConfig.NetworkMode = cfg.HostConfig.NetworkMode
+	c.HostConfig.ReadonlyRootfs = cfg.HostConfig.ReadonlyRootfs
+	c.HostConfig.CapDrop = cfg.HostConfig.CapDrop
+	c.HostConfig.SecurityOpt = cfg.HostConfig.SecurityOpt
 	c.NetworkSettings.Networks = map[string]docker.EndpointSettings{}
 	if mode := cfg.HostConfig.NetworkMode; mode != "" {
 		n, ok := f.network(mode)

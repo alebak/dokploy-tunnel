@@ -351,6 +351,14 @@ func (p *Proxy) createContainer(w http.ResponseWriter, r *http.Request, prefix s
 	if err := checkRepeater(cfg, p.image); err != nil {
 		return err
 	}
+	// A name or ID that passes checkRepeater can still refer to the host's
+	// network stack or the null network; the network's full ID pins the
+	// one checked.
+	netID, err := p.network(w, r, prefix, cfg.HostConfig.NetworkMode)
+	if netID == "" || err != nil {
+		return err
+	}
+	cfg.HostConfig.NetworkMode = netID
 	body, err := json.Marshal(cfg)
 	if err != nil {
 		return err
@@ -440,29 +448,62 @@ func (p *Proxy) takeExec(id string) bool {
 }
 
 // repeater inspects the container ref through the daemon and returns its
-// ID if it is a repeater running the repeater image. If the daemon answers
-// with an error, that answer is relayed to the client and the ID is empty.
+// ID if it is a repeater running the repeater image. A tenant can copy a
+// repeater's label, name and image, so the container must also be confined
+// like one. If the daemon answers with an error, that answer is relayed to
+// the client and the ID is empty.
 func (p *Proxy) repeater(w http.ResponseWriter, r *http.Request, prefix, ref string) (string, error) {
-	resp, err := p.roundTrip(r.Context(), http.MethodGet, prefix+"/containers/"+url.PathEscape(ref)+"/json", nil, nil)
-	if err != nil {
-		return "", err
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		relay(w, resp)
-		return "", nil
-	}
 	var c docker.Container
-	if err := json.NewDecoder(io.LimitReader(resp.Body, maxResponseBytes)).Decode(&c); err != nil {
-		return "", fmt.Errorf("decoding container %s: %w", ref, err)
+	if ok, err := p.inspect(w, r, prefix+"/containers/"+url.PathEscape(ref)+"/json", &c); !ok || err != nil {
+		return "", err
 	}
 	if c.Config.Labels[labelRepeater] != "1" || c.Config.Image != p.image || !isRepeaterName(strings.TrimPrefix(c.Name, "/")) {
 		return "", deny("container %s is not a repeater", ref)
+	}
+	if err := checkConfined(c); err != nil {
+		return "", deny("container %s is not a repeater: %v", ref, err)
 	}
 	if !objectRef.MatchString(c.ID) {
 		return "", fmt.Errorf("the daemon reports container %s with ID %q", ref, c.ID)
 	}
 	return c.ID, nil
+}
+
+// network inspects the network ref through the daemon and returns its full
+// ID if a repeater may join it: any network but the host's network stack
+// and the null network. If the daemon answers with an error, that answer
+// is relayed to the client and the ID is empty.
+func (p *Proxy) network(w http.ResponseWriter, r *http.Request, prefix, ref string) (string, error) {
+	var n docker.Network
+	if ok, err := p.inspect(w, r, prefix+"/networks/"+url.PathEscape(ref), &n); !ok || err != nil {
+		return "", err
+	}
+	if n.Driver == "" || n.Driver == "host" || n.Driver == "null" {
+		return "", deny("network %s has driver %q; a repeater joins a network of its own", ref, n.Driver)
+	}
+	if !objectRef.MatchString(n.ID) {
+		return "", fmt.Errorf("the daemon reports network %s with ID %q", ref, n.ID)
+	}
+	return n.ID, nil
+}
+
+// inspect reads the object at path from the daemon into v. If the daemon
+// answers with an error, that answer is relayed to the client and ok is
+// false.
+func (p *Proxy) inspect(w http.ResponseWriter, r *http.Request, path string, v any) (ok bool, err error) {
+	resp, err := p.roundTrip(r.Context(), http.MethodGet, path, nil, nil)
+	if err != nil {
+		return false, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		relay(w, resp)
+		return false, nil
+	}
+	if err := json.NewDecoder(io.LimitReader(resp.Body, maxResponseBytes)).Decode(v); err != nil {
+		return false, fmt.Errorf("decoding %s: %w", path, err)
+	}
+	return true, nil
 }
 
 // roundTrip sends a request to the daemon; body, when not nil, is JSON.

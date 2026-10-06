@@ -29,11 +29,7 @@ func Run(ctx context.Context, cfg Config, log *slog.Logger) error {
 
 // serve serves p on ln until ctx is done.
 func serve(ctx context.Context, ln net.Listener, p *Proxy, log *slog.Logger) error {
-	srv := &http.Server{
-		Handler:           p,
-		ReadHeaderTimeout: 10 * time.Second,
-		ErrorLog:          slog.NewLogLogger(log.Handler(), slog.LevelWarn),
-	}
+	srv := newServer(p, log, defaultTimeouts)
 	errc := make(chan error, 1)
 	go func() { errc <- srv.Serve(ln) }()
 	log.Info("serving", "address", ln.Addr().String(), "repeater_image", p.image)
@@ -51,4 +47,26 @@ func serve(ctx context.Context, ln net.Listener, p *Proxy, log *slog.Logger) err
 		return fmt.Errorf("serving: %w", err)
 	}
 	return nil
+}
+
+// timeouts bound how long a client may take: to send a request's headers,
+// then its body, and to send the next request on a kept-alive connection.
+// The server lifts the read deadline once the body is read, and when the
+// connection is hijacked, so they bound neither the daemon's answer nor an
+// exec's stream; TestServer_Timeouts holds it to that.
+type timeouts struct {
+	header, body, idle time.Duration
+}
+
+var defaultTimeouts = timeouts{header: 10 * time.Second, body: 30 * time.Second, idle: 2 * time.Minute}
+
+// newServer returns the server that serves p.
+func newServer(p *Proxy, log *slog.Logger, t timeouts) *http.Server {
+	return &http.Server{
+		Handler:           p,
+		ReadHeaderTimeout: t.header,
+		ReadTimeout:       t.header + t.body,
+		IdleTimeout:       t.idle,
+		ErrorLog:          slog.NewLogLogger(log.Handler(), slog.LevelWarn),
+	}
 }

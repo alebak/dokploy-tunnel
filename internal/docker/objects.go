@@ -36,7 +36,9 @@ type Container struct {
 		StartedAt string `json:"StartedAt"`
 	} `json:"State"`
 	Config struct {
-		Image  string            `json:"Image"`
+		Image string `json:"Image"`
+		// User is the user the container runs as, such as "65534:65534".
+		User   string            `json:"User"`
 		Labels map[string]string `json:"Labels"`
 		// ExposedPorts are keyed like "5432/tcp".
 		ExposedPorts map[string]struct{} `json:"ExposedPorts"`
@@ -52,8 +54,13 @@ type Container struct {
 		PidMode string `json:"PidMode"`
 		// CapAdd are the capabilities added to the default set, such as
 		// "NET_ADMIN" or "CAP_SYS_ADMIN".
-		CapAdd  []string        `json:"CapAdd"`
+		CapAdd []string `json:"CapAdd"`
+		// CapDrop are the capabilities removed from the default set; "ALL"
+		// removes every one.
+		CapDrop []string        `json:"CapDrop"`
 		Devices []DeviceMapping `json:"Devices"`
+		// ReadonlyRootfs reports a read-only root file system.
+		ReadonlyRootfs bool `json:"ReadonlyRootfs"`
 		// DeviceRequests ask a device driver, such as NVIDIA's, for host
 		// devices like GPUs.
 		DeviceRequests []DeviceRequest `json:"DeviceRequests"`

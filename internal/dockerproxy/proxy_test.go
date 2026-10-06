@@ -75,6 +75,13 @@ type chain struct {
 
 func newChain(t *testing.T) *chain {
 	t.Helper()
+	return newChainServing(t, dockerproxy.NewDefaultServer)
+}
+
+// newChainServing is newChain with the proxy served by the server
+// newServer returns.
+func newChainServing(t *testing.T, newServer func(*dockerproxy.Proxy, *slog.Logger) *http.Server) *chain {
+	t.Helper()
 	fake := dockertest.New(t)
 	fake.AddNetwork(appNetwork)
 	fake.AddNetwork(swarmClosed)
@@ -83,11 +90,7 @@ func newChain(t *testing.T) *chain {
 		Networks: map[string][]string{appNetwork.Name: {"postgres"}},
 		IPs:      map[string]string{appNetwork.Name: appIP},
 	})
-	fake.AddContainer(dockertest.Container{
-		ID: repeaterID, Name: "doktunnel-repeater-0123456789ab", Image: testImage, Running: true,
-		Labels:   repeaterLabels(),
-		Networks: map[string][]string{appNetwork.Name: nil},
-	})
+	fake.AddContainer(repeaterContainer(repeaterID, "doktunnel-repeater-0123456789ab"))
 	fake.AddContainer(dockertest.Container{
 		ID: lookalikeID, Name: "doktunnel-repeater-ba9876543210", Image: "busybox", Running: true,
 		Labels:   repeaterLabels(),
@@ -99,7 +102,9 @@ func newChain(t *testing.T) *chain {
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
-	srv := httptest.NewServer(p)
+	srv := httptest.NewUnstartedServer(nil)
+	srv.Config = newServer(p, slog.New(slog.NewTextHandler(logs, nil)))
+	srv.Start()
 	t.Cleanup(srv.Close)
 	client, err := docker.New("tcp://" + srv.Listener.Addr().String())
 	if err != nil {
@@ -113,6 +118,20 @@ func testContext(t *testing.T) context.Context {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	t.Cleanup(cancel)
 	return ctx
+}
+
+// repeaterContainer is a running repeater as the companion creates it.
+func repeaterContainer(id, name string) dockertest.Container {
+	return dockertest.Container{
+		ID: id, Name: name, Image: testImage, Running: true,
+		Labels:         repeaterLabels(),
+		Networks:       map[string][]string{appNetwork.Name: nil},
+		NetworkMode:    appNetwork.ID,
+		User:           "65534:65534",
+		CapDrop:        []string{"ALL"},
+		ReadonlyRootfs: true,
+		SecurityOpt:    []string{"no-new-privileges"},
+	}
 }
 
 // repeaterLabels are the labels the companion puts on a repeater.

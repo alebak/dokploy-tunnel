@@ -1,6 +1,8 @@
 package dockerproxy
 
 import (
+	"errors"
+	"fmt"
 	"net/netip"
 	"regexp"
 	"slices"
@@ -75,7 +77,7 @@ func checkRepeater(cfg docker.ContainerConfig, image string) error {
 
 	h := cfg.HostConfig
 	switch {
-	case !objectRef.MatchString(h.NetworkMode) || h.NetworkMode == "host" || h.NetworkMode == "none":
+	case !isNetworkRef(h.NetworkMode):
 		return deny("network mode %q is not a network's ID or name", h.NetworkMode)
 	case !h.ReadonlyRootfs:
 		return deny("a repeater has a read-only root file system")
@@ -89,6 +91,38 @@ func checkRepeater(cfg docker.ContainerConfig, image string) error {
 		return deny("a repeater's process limit is between 1 and %d", maxPidsLimit)
 	case h.Memory <= 0 || h.Memory > maxMemoryBytes:
 		return deny("a repeater's memory limit is between 1 and %d bytes", maxMemoryBytes)
+	}
+	return nil
+}
+
+// isNetworkRef reports whether mode names a network, rather than the
+// host's network stack, no network or another container's.
+func isNetworkRef(mode string) bool {
+	return objectRef.MatchString(mode) && mode != "host" && mode != "none"
+}
+
+// checkConfined checks that an inspected container is confined like a
+// repeater: unprivileged, as nobody, on a network of its own, with every
+// capability dropped, no new privileges, a read-only root file system and
+// nothing mounted. An exec in such a container gets nothing an exec in a
+// repeater would not.
+func checkConfined(c docker.Container) error {
+	h := c.HostConfig
+	switch {
+	case h.Privileged:
+		return errors.New("it is privileged")
+	case !isNetworkRef(h.NetworkMode):
+		return fmt.Errorf("network mode %q is not a network's ID or name", h.NetworkMode)
+	case c.Config.User != repeaterUser:
+		return fmt.Errorf("it does not run as %s", repeaterUser)
+	case !slices.Contains(h.CapDrop, "ALL") || len(h.CapAdd) > 0:
+		return errors.New("it keeps capabilities")
+	case !slices.Contains(h.SecurityOpt, "no-new-privileges"):
+		return errors.New("it may gain new privileges")
+	case !h.ReadonlyRootfs:
+		return errors.New("its root file system is writable")
+	case len(h.Binds) > 0 || len(c.Mounts) > 0:
+		return errors.New("it has mounts")
 	}
 	return nil
 }

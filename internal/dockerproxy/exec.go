@@ -60,6 +60,9 @@ func (p *Proxy) startExec(w http.ResponseWriter, r *http.Request, prefix, id str
 		daemon.Close()
 		return fmt.Errorf("taking over the client's connection: %w", err)
 	}
+	// The server's deadlines may still be set on the connection; the
+	// stream lasts as long as the command does.
+	_ = client.SetDeadline(time.Time{})
 	contentType := "application/vnd.docker.raw-stream"
 	if resp.Header.Get("Content-Type") == "application/vnd.docker.multiplexed-stream" {
 		contentType = "application/vnd.docker.multiplexed-stream"
