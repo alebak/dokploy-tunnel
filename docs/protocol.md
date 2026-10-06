@@ -68,6 +68,10 @@ IDs are 1–128 characters of `A-Z a-z 0-9 _ -`. Compose service names are
 1–128 characters of `A-Z a-z 0-9 . _ -`, as the Compose specification allows.
 Unknown parameters are ignored.
 
+A `compose` target names a whole stack, which has no single port; it is
+authorized like any service but refused with `target_unreachable`. Forward to
+one of its services with `compose_service` instead.
+
 ### What the companion checks, in order
 
 1. The request is a `GET` WebSocket upgrade, and the parameters and key are
@@ -88,7 +92,10 @@ Unknown parameters are ignored.
 3. The service runs on this companion's Dokploy server (the `serverId` of the
    `.one` response; empty means the Dokploy server itself), and matches the
    optional `serverId` parameter.
-4. The stream to the target is opened.
+4. The stream to the target is opened: through a repeater container on the
+   target's own Docker network, which connects to the port. The companion
+   waits until the connection to the target is established, so a target
+   that refuses it is reported as `target_unreachable` before the upgrade.
 5. The connection is upgraded.
 
 ### Error responses (before the upgrade)
@@ -144,9 +151,8 @@ existing codes keep their meaning.
   is not an error, since a slow target delays reading it. Idle streams are
   kept open indefinitely; dead peers are detected by TCP keepalive.
 
-A target that refuses connections can appear as an upgrade followed by an
-immediate close, because the companion may only learn it when it first
-writes or reads.
+A target that accepts the connection and then closes it appears as an
+upgrade followed by a normal close.
 
 ### Close codes
 

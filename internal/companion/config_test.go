@@ -5,6 +5,10 @@ import (
 	"flag"
 	"io"
 	"testing"
+	"time"
+
+	"github.com/alebak/dokploy-tunnel/internal/docker"
+	"github.com/alebak/dokploy-tunnel/internal/repeater"
 )
 
 func env(vars map[string]string) func(string) string {
@@ -88,6 +92,11 @@ func TestParseConfig_Invalid(t *testing.T) {
 		{"malformed server ID", []string{"--dokploy-url", "http://dokploy:3000", "--server-id", "srv edge"}, nil},
 		{"unknown flag", []string{"--dokploy-url", "http://dokploy:3000", "--api-key", "x"}, nil},
 		{"positional argument", []string{"--dokploy-url", "http://dokploy:3000", "serve"}, nil},
+		{"unknown bridge", []string{"--dokploy-url", "http://dokploy:3000", "--bridge", "tcp"}, nil},
+		{"unsupported Docker host", []string{"--dokploy-url", "http://dokploy:3000"}, map[string]string{EnvDockerHost: "ssh://root@server"}},
+		{"zero grace", []string{"--dokploy-url", "http://dokploy:3000", "--repeater-grace", "0s"}, nil},
+		{"negative TTL", []string{"--dokploy-url", "http://dokploy:3000"}, map[string]string{EnvReaperTTL: "-1m"}},
+		{"malformed duration", []string{"--dokploy-url", "http://dokploy:3000"}, map[string]string{EnvRepeaterGrace: "soon"}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -101,5 +110,56 @@ func TestParseConfig_Invalid(t *testing.T) {
 func TestParseConfig_Help(t *testing.T) {
 	if _, err := ParseConfig([]string{"--help"}, env(nil), io.Discard); !errors.Is(err, flag.ErrHelp) {
 		t.Fatalf("ParseConfig(--help) = %v, want flag.ErrHelp", err)
+	}
+}
+
+func TestParseConfig_Docker(t *testing.T) {
+	tests := []struct {
+		name string
+		args []string
+		env  map[string]string
+		want Config
+	}{
+		{
+			"defaults",
+			nil,
+			nil,
+			Config{Bridge: BridgeDocker, DockerHost: docker.DefaultHost, RepeaterImage: repeater.DefaultImage,
+				RepeaterGrace: repeater.DefaultGrace, ReaperTTL: repeater.DefaultTTL},
+		},
+		{
+			"environment",
+			nil,
+			map[string]string{
+				EnvBridge: "none", EnvDockerHost: "tcp://docker-proxy:2375", EnvRepeaterImage: "registry.example.com/socat:1",
+				EnvRepeaterGrace: "5s", EnvReaperTTL: "10m",
+			},
+			Config{Bridge: BridgeNone, DockerHost: "tcp://docker-proxy:2375", RepeaterImage: "registry.example.com/socat:1",
+				RepeaterGrace: 5 * time.Second, ReaperTTL: 10 * time.Minute},
+		},
+		{
+			"flags win",
+			[]string{"--bridge", "docker", "--docker-host", "unix:///run/docker.sock", "--repeater-image", "socat:2",
+				"--repeater-grace", "1m", "--reaper-ttl", "2m"},
+			map[string]string{EnvBridge: "none", EnvDockerHost: "tcp://docker-proxy:2375"},
+			Config{Bridge: BridgeDocker, DockerHost: "unix:///run/docker.sock", RepeaterImage: "socat:2",
+				RepeaterGrace: time.Minute, ReaperTTL: 2 * time.Minute},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			vars := map[string]string{EnvDokployURL: "http://dokploy:3000"}
+			for k, v := range tt.env {
+				vars[k] = v
+			}
+			got, err := ParseConfig(tt.args, env(vars), io.Discard)
+			if err != nil {
+				t.Fatalf("ParseConfig: %v", err)
+			}
+			if got.Bridge != tt.want.Bridge || got.DockerHost != tt.want.DockerHost || got.RepeaterImage != tt.want.RepeaterImage ||
+				got.RepeaterGrace != tt.want.RepeaterGrace || got.ReaperTTL != tt.want.ReaperTTL {
+				t.Errorf("ParseConfig = %+v, want %+v", got, tt.want)
+			}
+		})
 	}
 }
