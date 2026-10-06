@@ -313,7 +313,7 @@ The compose check relies on two facts that hold under Dokploy's default deployme
 
 Known limitations being worked on:
 
-- [#60](https://github.com/alebak/dokploy-tunnel/issues/60): remaining unsafe-target gaps in repeater resolution.
+- [#68](https://github.com/alebak/dokploy-tunnel/issues/68): a daemon configured with a custom data root, and targets running with weakened security profiles (`seccomp`, AppArmor or SELinux disabled), are not yet recognized as unsafe.
 - [#62](https://github.com/alebak/dokploy-tunnel/issues/62): the reaper should remove only repeater containers the companion created.
 
 ## Releases and versioning
