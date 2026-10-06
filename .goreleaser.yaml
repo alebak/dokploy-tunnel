@@ -45,6 +45,24 @@ builds:
       - -X github.com/alebak/dokploy-tunnel/internal/version.Commit={{ .ShortCommit }}
       - -X github.com/alebak/dokploy-tunnel/internal/version.Date={{ .Date }}
 
+  - id: doktunnel-socket-proxy
+    main: ./cmd/doktunnel-socket-proxy
+    binary: doktunnel-socket-proxy
+    env:
+      - CGO_ENABLED=0
+    flags:
+      - -trimpath
+    goos:
+      - linux
+    goarch:
+      - amd64
+      - arm64
+    ldflags:
+      - -s -w
+      - -X github.com/alebak/dokploy-tunnel/internal/version.Version={{ .Version }}
+      - -X github.com/alebak/dokploy-tunnel/internal/version.Commit={{ .ShortCommit }}
+      - -X github.com/alebak/dokploy-tunnel/internal/version.Date={{ .Date }}
+
 # Archive names are a public contract: scripts/install.sh and scripts/install.ps1
 # depend on "doktunnel_<version>_<os>_<arch>.<ext>".
 archives:
@@ -59,12 +77,49 @@ archives:
           - zip
     name_template: "doktunnel_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
 
+  # The companion and the socket proxy that holds the Docker socket for it
+  # are deployed together, so they ship in one archive.
   - id: doktunnel-companion
     ids:
       - doktunnel-companion
+      - doktunnel-socket-proxy
     formats:
       - tar.gz
     name_template: "doktunnel-companion_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+
+# One multi-platform image with both server-side binaries. dockers_v2 builds
+# and pushes in a single "docker buildx build --push", so images are built in
+# the publish phase: a snapshot builds one local image per platform (tags
+# suffixed with the architecture) and pushes nothing; --skip=docker skips it.
+dockers_v2:
+  - id: doktunnel-companion
+    dockerfile: build/companion.Dockerfile
+    ids:
+      - doktunnel-companion
+      - doktunnel-socket-proxy
+    images:
+      - ghcr.io/alebak/doktunnel-companion
+    tags:
+      - "{{ .Version }}"
+      - "{{ if not .Prerelease }}latest{{ end }}"
+    platforms:
+      - linux/amd64
+      - linux/arm64
+    labels:
+      org.opencontainers.image.title: doktunnel-companion
+      org.opencontainers.image.description: "Server-side companion and Docker socket proxy for dokploy-tunnel"
+      org.opencontainers.image.source: https://github.com/alebak/dokploy-tunnel
+      org.opencontainers.image.url: https://github.com/alebak/dokploy-tunnel
+      org.opencontainers.image.version: "{{ .Version }}"
+      org.opencontainers.image.revision: "{{ .FullCommit }}"
+      org.opencontainers.image.created: "{{ .Date }}"
+      org.opencontainers.image.licenses: MIT
+    annotations:
+      "index,manifest:org.opencontainers.image.description": "Server-side companion and Docker socket proxy for dokploy-tunnel"
+      "index,manifest:org.opencontainers.image.source": https://github.com/alebak/dokploy-tunnel
+      "index,manifest:org.opencontainers.image.version": "{{ .Version }}"
+      "index,manifest:org.opencontainers.image.revision": "{{ .FullCommit }}"
+      "index,manifest:org.opencontainers.image.licenses": MIT
 
 checksum:
   name_template: "checksums.txt"
@@ -90,11 +145,17 @@ release:
 
     ### `doktunnel-companion` (server-side, Linux only)
 
+    Each archive holds `doktunnel-companion` and `doktunnel-socket-proxy`.
+
     | OS | amd64 | arm64 |
     |----|-------|-------|
     | Linux | `doktunnel-companion_{{ .Version }}_linux_amd64.tar.gz` | `doktunnel-companion_{{ .Version }}_linux_arm64.tar.gz` |
 
     SHA-256 checksums for every archive are published in `checksums.txt`.
+
+    ### Container image (server-side)
+
+    `ghcr.io/alebak/doktunnel-companion:{{ .Version }}` for linux/amd64 and linux/arm64, with both server-side binaries.
   footer: |
     ## Install
 

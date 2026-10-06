@@ -42,7 +42,22 @@ Download the archive for your platform from [Releases](https://github.com/alebak
 
 ### Companion
 
-`doktunnel-companion` archives are attached to each release for Linux amd64 and arm64. A supported installation method (a container image) will be documented once the companion is functional; see [Companion server](#companion-server) for what it does and how it is configured.
+Each release publishes a container image for linux/amd64 and linux/arm64:
+
+```
+ghcr.io/alebak/doktunnel-companion:<version>
+```
+
+`<version>` is the release version without the `v`, such as `0.5.0`; `latest` follows the newest stable release. Pin a version in deployments.
+
+The image is based on distroless `static` and runs as its `nonroot` user (65532). It holds both server-side binaries in `/usr/local/bin`:
+
+- `doktunnel-companion`, the default entrypoint, listening on port 8080 (see [Companion server](#companion-server)).
+- `doktunnel-socket-proxy`, run from the same image with the entrypoint `doktunnel-socket-proxy` (see [Socket proxy](#socket-proxy)). To open the Docker socket, which is usually owned by `root:docker`, give its container the socket's group by numeric ID (Compose `group_add`) rather than running it as root.
+
+The image sets `DOKTUNNEL_COMPANION_REPEATER_KEY_FILE=/var/lib/doktunnel/repeater.key` and declares `/var/lib/doktunnel` as a volume. Mount a named volume there, so the repeater key survives a recreated container.
+
+The same two binaries are also attached to each release as `doktunnel-companion_<version>_linux_<arch>.tar.gz` archives. A full installation guide for a Dokploy server is in progress.
 
 ## Usage
 
@@ -352,7 +367,7 @@ The compose check relies on two facts that hold under Dokploy's default deployme
 
 - Versions follow [Semantic Versioning](https://semver.org) and are derived from [Conventional Commits](https://www.conventionalcommits.org) by [release-please](https://github.com/googleapis/release-please).
 - Merges to `main` keep a release pull request up to date with the next version and the generated `CHANGELOG.md`.
-- Merging that pull request tags the release; [GoReleaser](https://goreleaser.com) then builds both binaries and attaches the archives and `checksums.txt` to the GitHub release.
+- Merging that pull request tags the release; [GoReleaser](https://goreleaser.com) then builds the binaries, attaches the archives and `checksums.txt` to the GitHub release, and pushes the companion image to `ghcr.io/alebak/doktunnel-companion`.
 - Before 1.0.0, breaking changes bump the minor version.
 
 ## Platform verification

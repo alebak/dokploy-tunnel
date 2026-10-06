@@ -1,0 +1,101 @@
+name: image
+
+# Builds the companion image (dockers_v2 in .goreleaser.yaml) in snapshot
+# mode on every change, so build/companion.Dockerfile is verified before a
+# release depends on it. A snapshot builds one local image per platform, with
+# the architecture appended to each tag, and pushes nothing.
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+concurrency:
+  group: image-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  image:
+    runs-on: ubuntu-latest
+    env:
+      IMAGE: ghcr.io/alebak/doktunnel-companion
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          # GoReleaser derives the snapshot version from the tags.
+          fetch-depth: 0
+
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+
+      # The docker-container driver supports the SBOM attestation that
+      # dockers_v2 requests and loads each platform's image into the daemon.
+      - uses: docker/setup-buildx-action@v4
+
+      - name: Build snapshot images without pushing
+        uses: goreleaser/goreleaser-action@v7
+        with:
+          version: "~> v2"
+          args: release --snapshot --clean --skip=archive
+
+      - name: Verify the images
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="$(jq -r .version dist/metadata.json)"
+          amd64="$IMAGE:$version-amd64"
+          arm64="$IMAGE:$version-arm64"
+          docker image ls "$IMAGE"
+
+          fail() { echo "::error::$*"; exit 1; }
+
+          arch="$(docker image inspect -f '{{.Architecture}}' "$arm64")"
+          [ "$arch" = arm64 ] || fail "$arm64 is built for $arch, want arm64"
+
+          companion="$(docker run --rm "$amd64" --version)"
+          echo "$companion"
+          case "$companion" in
+            *doktunnel-companion*"$version"*) ;;
+            *) fail "companion reports '$companion', want version $version" ;;
+          esac
+
+          proxy="$(docker run --rm --entrypoint doktunnel-socket-proxy "$amd64" --version)"
+          echo "$proxy"
+          case "$proxy" in
+            *doktunnel-socket-proxy*"$version"*) ;;
+            *) fail "socket proxy reports '$proxy', want version $version" ;;
+          esac
+
+          user="$(docker image inspect -f '{{.Config.User}}' "$amd64")"
+          [ "$user" = 65532:65532 ] || fail "image runs as '$user', want 65532:65532"
+
+          docker image inspect -f '{{json .Config.Env}}' "$amd64" |
+            grep -q '"DOKTUNNEL_COMPANION_REPEATER_KEY_FILE=/var/lib/doktunnel/repeater.key"' ||
+            fail "DOKTUNNEL_COMPANION_REPEATER_KEY_FILE is not /var/lib/doktunnel/repeater.key"
+          docker image inspect -f '{{json .Config.Volumes}}' "$amd64" | grep -q '"/var/lib/doktunnel"' ||
+            fail "/var/lib/doktunnel is not a declared volume"
+
+          for label in source=https://github.com/alebak/dokploy-tunnel version="$version" licenses=MIT; do
+            key="org.opencontainers.image.${label%%=*}"
+            got="$(docker image inspect -f "{{index .Config.Labels \"$key\"}}" "$amd64")"
+            [ "$got" = "${label#*=}" ] || fail "label $key is '$got', want '${label#*=}'"
+          done
+
+          # The key directory must be writable by the nonroot user, and a new
+          # volume mounted there inherits its ownership.
+          container="$(docker create "$amd64")"
+          owner="$(docker export "$container" | tar -tv --numeric-owner | awk '$6 == "var/lib/doktunnel/" { print $2 }')"
+          docker rm "$container" >/dev/null
+          [ "$owner" = 65532/65532 ] || fail "/var/lib/doktunnel is owned by '$owner', want 65532/65532"
+
+          {
+            echo "- \`$amd64\` and \`$arm64\` built (not pushed)"
+            echo "- \`$companion\`"
+            echo "- \`$proxy\`"
+            echo "- runs as 65532:65532; key file on the /var/lib/doktunnel volume (owner $owner)"
+          } >>"$GITHUB_STEP_SUMMARY"
