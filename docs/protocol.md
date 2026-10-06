@@ -27,6 +27,7 @@ anything else.
 | Method | Path | Purpose |
 |--------|------|---------|
 | `GET` (WebSocket upgrade) | `/v1/tunnel` | Open one TCP stream to a target |
+| `GET` | `/v1/ports` | List the TCP ports a target exposes, for a client that was given no port |
 | `GET` | `/healthz` | Liveness: `200` with `{"status":"ok"}` while the companion accepts tunnels, `503` with `{"status":"shutting_down"}` while it drains |
 
 The path is versioned; an incompatible protocol gets a new path.
@@ -152,6 +153,65 @@ itself, so the client can pick the right companion:
 
 Clients must branch on `code`, not on `message`. New codes may be added;
 existing codes keep their meaning.
+
+## Listing a target's ports
+
+A client that was not given a port asks the companion which ports the
+target exposes. This is a plain HTTP request, not a WebSocket:
+
+```http
+GET /v1/ports?serviceType=compose_service&serviceId=cmp_myapp%2Fpostgres HTTP/1.1
+Host: companion.example.com
+x-api-key: <Dokploy API key>
+```
+
+The headers are those of a tunnel request, and so are the query parameters,
+without `port` (one is ignored): `serviceType`, `serviceId` and the optional
+`serverId`.
+
+The companion checks the request as it checks a tunnel request: steps 1 to 3
+above, with the same authorization through Dokploy and the caller's key,
+except that no WebSocket upgrade is expected. Then it **inspects** the
+target's running container, found the same way as for a tunnel, and answers
+the TCP ports its image exposes (Docker's `Config.ExposedPorts`), sorted by
+number:
+
+```http
+HTTP/1.1 200 OK
+Content-Type: application/json
+
+{"ports":[{"port":5432,"protocol":"tcp"}]}
+```
+
+- Only TCP ports are listed, each once; `protocol` is always `tcp`.
+- The list is empty, never `null`, when the ports are unknown: the image
+  exposes none, the target's only running Swarm task is on another node
+  (whose containers the companion cannot inspect), or the companion cannot
+  forward at all (`DOKTUNNEL_COMPANION_BRIDGE=none`). The client then needs a port
+  from the user; it must not guess one.
+- A listing takes no tunnel slot and creates nothing: no repeater container
+  is started, no network is joined, no connection to the target is made.
+  Exposed ports are what the image declares, not proof that something
+  listens on them.
+
+Rejections have the JSON body and status codes of the tunnel's
+[error responses](#error-responses-before-the-upgrade). Those a ports
+request can get:
+
+| HTTP status | `code` | When |
+|-------------|--------|------|
+| 400 | `invalid_argument` | A parameter or header is missing or malformed |
+| 401 | `unauthenticated` | No `x-api-key` header |
+| 403 | `permission_denied` | Dokploy rejected the key for this target, as for a tunnel |
+| 403 | `forbidden_origin` | A browser `Origin` that does not match `Host` |
+| 404 | `not_found` | The compose stack has no such service, as for a tunnel |
+| 405 | `method_not_allowed` | Not a `GET` |
+| 421 | `wrong_server` | The target runs on another Dokploy server, named in `expected_server_id` |
+| 502 | `unreachable` | The Dokploy API could not be reached |
+| 502 | `target_unreachable` | Nothing runs for the target, its containers are ambiguous, or the companion refuses the target, as for a tunnel |
+| 503 | `unavailable` | The companion is shutting down |
+| 504 | `timeout` | Dokploy or Docker did not answer in time |
+| 500 | `internal` | Unexpected failure |
 
 ## The stream (after the upgrade)
 

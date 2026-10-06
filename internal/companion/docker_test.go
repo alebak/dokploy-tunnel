@@ -9,6 +9,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -111,8 +112,9 @@ func newDockerCompanion(t *testing.T, targetAddr string, opts repeater.Options) 
 			"com.docker.compose.service":             "postgres",
 			"com.docker.compose.project.working_dir": repeater.DefaultComposeDir + "/" + project + "/code",
 		},
-		Networks: map[string][]string{project + "_default": {"postgres"}},
-		IPs:      map[string]string{project + "_default": pgIP},
+		Networks:     map[string][]string{project + "_default": {"postgres"}},
+		IPs:          map[string]string{project + "_default": pgIP},
+		ExposedPorts: []string{"5432/tcp"},
 	})
 	// pg_main runs only on a non-attachable overlay.
 	addSwarmService(fake, "svc-pgmain", "shop-pgmain-a1b2c3", "net-closed", "10.0.4.5")
@@ -228,14 +230,62 @@ func TestDockerBridge_ExposedPorts(t *testing.T) {
 	dc.fake.AddContainer(dockertest.Container{
 		ID: "redis", Name: "shop-redis.1.x", Running: true,
 		Labels:       map[string]string{"com.docker.swarm.service.name": "shop-redis"},
-		ExposedPorts: []string{"6379/tcp"},
+		ExposedPorts: []string{"16379/tcp", "6379/udp", "6379/tcp", "8000-8010/tcp"},
 	})
 	got, err := dc.bridge.ExposedPorts(context.Background(), Target{
 		Target:  tunnel.Target{ServiceType: dokploy.ServiceRedis, ServiceID: "redis_main"},
 		Service: dokploy.ServiceDetails{AppName: "shop-redis"},
 	})
-	if err != nil || len(got) != 1 || got[0] != (repeater.Port{Number: 6379, Protocol: "tcp"}) {
-		t.Errorf("ExposedPorts = %v, %v", got, err)
+	want := []tunnel.Port{{Port: 6379, Protocol: "tcp"}, {Port: 16379, Protocol: "tcp"}}
+	if err != nil || !slices.Equal(got, want) {
+		t.Errorf("ExposedPorts = %v, %v; want %v", got, err, want)
+	}
+}
+
+func TestTCPPorts(t *testing.T) {
+	got := tcpPorts([]repeater.Port{
+		{Number: 80, Protocol: "tcp"}, {Number: 53, Protocol: "udp"}, {Number: 22, Protocol: "tcp"},
+		{Number: 80, Protocol: "tcp"}, {Number: 9000, Protocol: "sctp"},
+	})
+	want := []tunnel.Port{{Port: 22, Protocol: "tcp"}, {Port: 80, Protocol: "tcp"}}
+	if !slices.Equal(got, want) {
+		t.Errorf("tcpPorts = %v, want %v", got, want)
+	}
+}
+
+func TestDockerBridge_PortsEndpoint(t *testing.T) {
+	tests := []struct {
+		name   string
+		query  string
+		status int
+		want   string
+	}{
+		{"compose service", "serviceType=compose_service&serviceId=cmp_myapp/postgres", 200,
+			`{"ports":[{"port":5432,"protocol":"tcp"}]}`},
+		// pg_main's task container is not on this node: its ports are unknown.
+		{"Swarm task on another node", "serviceType=postgres&serviceId=pg_main", 200, `{"ports":[]}`},
+		{"nothing running", "serviceType=application&serviceId=app_web", 502, ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			dc := newDockerCompanion(t, closedTCPAddr(t), repeater.Options{})
+			before := len(dc.fake.ContainerIDs())
+			resp := request(t, http.MethodGet, dc.http.URL+tunnel.PortsPath+"?"+tt.query, ownerKey, nil)
+			if tt.status != http.StatusOK {
+				assertRejected(t, resp, tt.status, tunnel.CodeTargetUnreachable)
+			} else {
+				raw, err := io.ReadAll(resp.Body)
+				if err != nil || resp.StatusCode != tt.status || strings.TrimSpace(string(raw)) != tt.want {
+					t.Errorf("HTTP %d %s, %v; want %d %s", resp.StatusCode, raw, err, tt.status, tt.want)
+				}
+			}
+			if created, execs, pulls := dc.fake.Created(), dc.fake.Execs(), dc.fake.Pulls(); len(created)+len(execs)+len(pulls) != 0 {
+				t.Errorf("listing ports created %v, ran %v, pulled %v", created, execs, pulls)
+			}
+			if after := len(dc.fake.ContainerIDs()); after != before {
+				t.Errorf("containers went from %d to %d", before, after)
+			}
+		})
 	}
 }
 

@@ -97,9 +97,16 @@ func newTestCompanion(t *testing.T) *testCompanion {
 // newLimitedCompanion is a testCompanion with the given tunnel limits.
 func newLimitedCompanion(t *testing.T, limits Limits) *testCompanion {
 	t.Helper()
+	return newWrappedCompanion(t, limits, func(b *pipeBridge) Bridge { return b })
+}
+
+// newWrappedCompanion is a testCompanion with the given tunnel limits,
+// whose server uses the Bridge that wrap makes of its pipeBridge.
+func newWrappedCompanion(t *testing.T, limits Limits, wrap func(*pipeBridge) Bridge) *testCompanion {
+	t.Helper()
 	tc := &testCompanion{fake: newFakeDokploy(t), bridge: newPipeBridge(), logs: &syncBuffer{}}
 	log := slog.New(slog.NewTextHandler(tc.logs, &slog.HandlerOptions{Level: slog.LevelDebug}))
-	tc.server = NewServer(NewAuthorizer(tc.fake.start(), ""), tc.bridge, log, limits)
+	tc.server = NewServer(NewAuthorizer(tc.fake.start(), ""), wrap(tc.bridge), log, limits)
 	tc.http = httptest.NewServer(tc.server)
 	t.Cleanup(func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)

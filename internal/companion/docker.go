@@ -1,6 +1,7 @@
 package companion
 
 import (
+	"cmp"
 	"context"
 	"errors"
 	"fmt"
@@ -8,10 +9,12 @@ import (
 	"log/slog"
 	"net/netip"
 	"net/url"
+	"slices"
 
 	"github.com/alebak/dokploy-tunnel/internal/docker"
 	"github.com/alebak/dokploy-tunnel/internal/dokploy"
 	"github.com/alebak/dokploy-tunnel/internal/repeater"
+	"github.com/alebak/dokploy-tunnel/internal/tunnel"
 )
 
 // DockerBridge is a Bridge that reaches targets through repeater
@@ -20,7 +23,10 @@ type DockerBridge struct {
 	repeater *repeater.Repeater
 }
 
-var _ Bridge = (*DockerBridge)(nil)
+var (
+	_ Bridge     = (*DockerBridge)(nil)
+	_ PortLister = (*DockerBridge)(nil)
+)
 
 // NewDockerBridge returns a DockerBridge that runs repeaters through c.
 func NewDockerBridge(c *docker.Client, opts repeater.Options) *DockerBridge {
@@ -44,11 +50,33 @@ func (b *DockerBridge) Open(ctx context.Context, target Target) (io.ReadWriteClo
 	}
 }
 
-// ExposedPorts returns the ports the image of target's running container
-// exposes, as Docker reports them in Config.ExposedPorts, for clients that
-// need a port the user did not give.
-func (b *DockerBridge) ExposedPorts(ctx context.Context, target Target) ([]repeater.Port, error) {
-	return b.repeater.ExposedPorts(ctx, repeaterTarget(target))
+// ExposedPorts implements PortLister: the TCP ports the image of target's
+// running container exposes, as Docker reports them in
+// Config.ExposedPorts, for clients that need a port the user did not give.
+// It only inspects the target; no repeater is created.
+func (b *DockerBridge) ExposedPorts(ctx context.Context, target Target) ([]tunnel.Port, error) {
+	ports, err := b.repeater.ExposedPorts(ctx, repeaterTarget(target))
+	switch {
+	case err == nil:
+		return tcpPorts(ports), nil
+	case errors.Is(err, context.DeadlineExceeded), errors.Is(err, context.Canceled):
+		return nil, err
+	default:
+		return nil, fmt.Errorf("%w: %v", ErrTargetUnreachable, err)
+	}
+}
+
+// tcpPorts returns the TCP ports among ports, sorted by number and without
+// duplicates.
+func tcpPorts(ports []repeater.Port) []tunnel.Port {
+	var tcp []tunnel.Port
+	for _, p := range ports {
+		if p.Protocol == tunnel.ProtocolTCP {
+			tcp = append(tcp, tunnel.Port{Port: p.Number, Protocol: tunnel.ProtocolTCP})
+		}
+	}
+	slices.SortFunc(tcp, func(a, b tunnel.Port) int { return cmp.Compare(a.Port, b.Port) })
+	return slices.Compact(tcp)
 }
 
 // Run removes orphaned repeaters, now and periodically, until ctx is done.
