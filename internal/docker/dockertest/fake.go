@@ -50,6 +50,11 @@ type Container struct {
 	NetworkMode string
 	Binds       []string
 	Mounts      []docker.Mount
+	// SecurityOpt, MaskedPaths and ReadonlyPaths are reported in the
+	// container's host config.
+	SecurityOpt   []string
+	MaskedPaths   []string
+	ReadonlyPaths []string
 }
 
 // ExecConfig is an exec the fake daemon was asked to create.
@@ -97,6 +102,9 @@ type Fake struct {
 	removed    []string
 	pulls      []string
 	versions   []string
+	rootDir    string
+	infoError  *docker.APIError
+	infos      int
 	running    sync.WaitGroup
 }
 
@@ -112,6 +120,7 @@ func New(t testing.TB) *Fake {
 		volumes:    map[string]docker.Volume{},
 		images:     map[string]bool{},
 		execs:      map[string]ExecConfig{},
+		rootDir:    "/var/lib/docker",
 	}
 	f.srv = httptest.NewServer(http.HandlerFunc(f.serve))
 	t.Cleanup(func() {
@@ -150,6 +159,9 @@ func (f *Fake) AddContainer(c Container) {
 	dc.HostConfig.Privileged = c.Privileged
 	dc.HostConfig.NetworkMode = c.NetworkMode
 	dc.HostConfig.Binds = c.Binds
+	dc.HostConfig.SecurityOpt = c.SecurityOpt
+	dc.HostConfig.MaskedPaths = c.MaskedPaths
+	dc.HostConfig.ReadonlyPaths = c.ReadonlyPaths
 	dc.Mounts = c.Mounts
 	dc.NetworkSettings.Networks = map[string]docker.EndpointSettings{}
 	for name, aliases := range c.Networks {
@@ -199,6 +211,28 @@ func (f *Fake) AddTask(task docker.Task) {
 		task.Status.State = "running"
 	}
 	f.tasks = append(f.tasks, task)
+}
+
+// SetDockerRootDir sets the data root /info reports; /var/lib/docker by
+// default.
+func (f *Fake) SetDockerRootDir(dir string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.rootDir = dir
+}
+
+// FailInfo makes /info fail with err, or succeed again when err is nil.
+func (f *Fake) FailInfo(err *docker.APIError) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.infoError = err
+}
+
+// InfoRequests returns how many times /info was asked.
+func (f *Fake) InfoRequests() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.infos
 }
 
 // assignIP returns a fresh address; f.mu must be held.
@@ -389,6 +423,8 @@ func (f *Fake) serve(w http.ResponseWriter, r *http.Request) {
 	switch {
 	case r.Method == http.MethodGet && path == "/_ping":
 		_, _ = io.WriteString(w, "OK")
+	case r.Method == http.MethodGet && path == "/info":
+		f.info(w)
 	case r.Method == http.MethodGet && path == "/containers/json":
 		f.listContainers(w, r)
 	case r.Method == http.MethodGet && path == "/tasks":
@@ -428,6 +464,17 @@ func writeJSON(w http.ResponseWriter, status int, v any) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
 	_ = json.NewEncoder(w).Encode(v)
+}
+
+func (f *Fake) info(w http.ResponseWriter) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.infos++
+	if f.infoError != nil {
+		apiError(w, f.infoError.StatusCode, f.infoError.Message)
+		return
+	}
+	writeJSON(w, http.StatusOK, docker.Info{DockerRootDir: f.rootDir})
 }
 
 func (f *Fake) listContainers(w http.ResponseWriter, r *http.Request) {

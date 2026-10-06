@@ -64,6 +64,14 @@ type Container struct {
 		// Sysctls are the kernel parameters set in the container's
 		// namespaces, such as "net.core.somaxconn".
 		Sysctls map[string]string `json:"Sysctls"`
+		// SecurityOpt are the security options, such as "seccomp=unconfined"
+		// or, in the legacy form, "label:disable".
+		SecurityOpt []string `json:"SecurityOpt"`
+		// MaskedPaths and ReadonlyPaths are the kernel paths hidden from,
+		// or read-only in, the container. The daemon fills in its defaults;
+		// "--security-opt systempaths=unconfined" empties both.
+		MaskedPaths   []string `json:"MaskedPaths"`
+		ReadonlyPaths []string `json:"ReadonlyPaths"`
 	} `json:"HostConfig"`
 	Mounts          []Mount `json:"Mounts"`
 	NetworkSettings struct {
@@ -170,6 +178,33 @@ type ContainerSpec struct {
 	// Sysctls are the kernel parameters set in the tasks' namespaces.
 	// Swarm has no device mappings or device requests to report.
 	Sysctls map[string]string `json:"Sysctls"`
+	// Privileges are the tasks' security settings; nil keeps the defaults.
+	Privileges *Privileges `json:"Privileges,omitempty"`
+}
+
+// Privileges are the security settings of a Swarm service's tasks.
+type Privileges struct {
+	SELinuxContext *SELinuxContext `json:"SELinuxContext,omitempty"`
+	Seccomp        *SeccompOpts    `json:"Seccomp,omitempty"`
+	AppArmor       *AppArmorOpts   `json:"AppArmor,omitempty"`
+}
+
+// SELinuxContext is the SELinux labeling of a Swarm service's tasks.
+type SELinuxContext struct {
+	// Disable turns SELinux labeling off.
+	Disable bool `json:"Disable"`
+}
+
+// SeccompOpts is the seccomp profile of a Swarm service's tasks.
+type SeccompOpts struct {
+	// Mode is "default", "unconfined" or "custom".
+	Mode string `json:"Mode,omitempty"`
+}
+
+// AppArmorOpts is the AppArmor profile of a Swarm service's tasks.
+type AppArmorOpts struct {
+	// Mode is "default" or "disabled".
+	Mode string `json:"Mode,omitempty"`
 }
 
 // ServiceMount is a mount of a Swarm service's containers.

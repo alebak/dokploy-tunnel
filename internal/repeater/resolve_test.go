@@ -6,6 +6,7 @@ import (
 	"maps"
 	"slices"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -477,6 +478,11 @@ func TestResolve_RefusesHostLevelTargets(t *testing.T) {
 		{"host root bind", dockertest.Container{Binds: []string{"/:/host:ro"}}},
 		{"run directory mount", dockertest.Container{Mounts: []docker.Mount{{Type: "bind", Source: "/run", Destination: "/host-run"}}}},
 		{"containerd socket bind", dockertest.Container{Binds: []string{"/run/containerd/containerd.sock:/c.sock"}}},
+		{"seccomp unconfined", dockertest.Container{SecurityOpt: []string{"seccomp=unconfined"}}},
+		{"AppArmor unconfined", dockertest.Container{SecurityOpt: []string{"apparmor=unconfined"}}},
+		{"SELinux labeling disabled", dockertest.Container{SecurityOpt: []string{"label=disable"}}},
+		{"system paths unconfined", dockertest.Container{SecurityOpt: []string{"systempaths=unconfined"}}},
+		{"system paths unmasked", dockertest.Container{MaskedPaths: []string{}, ReadonlyPaths: []string{}}},
 	}
 	for _, tt := range tests {
 		t.Run("compose "+tt.name, func(t *testing.T) {
@@ -532,6 +538,9 @@ func TestResolve_RefusesHostLevelTargets(t *testing.T) {
 		{"creating a bind volume with a relative device", docker.ContainerSpec{Mounts: []docker.ServiceMount{bindVolumeMount("rel", "local", "bind", "run")}}},
 		{"setting a host-wide sysctl", docker.ContainerSpec{Sysctls: map[string]string{"kernel.panic": "1"}}},
 		{"setting a vm sysctl", docker.ContainerSpec{Sysctls: map[string]string{"vm.overcommit_memory": "1"}}},
+		{"running without seccomp", docker.ContainerSpec{Privileges: &docker.Privileges{Seccomp: &docker.SeccompOpts{Mode: "unconfined"}}}},
+		{"running without AppArmor", docker.ContainerSpec{Privileges: &docker.Privileges{AppArmor: &docker.AppArmorOpts{Mode: "disabled"}}}},
+		{"disabling SELinux labeling", docker.ContainerSpec{Privileges: &docker.Privileges{SELinuxContext: &docker.SELinuxContext{Disable: true}}}},
 	}
 	for _, tt := range specs {
 		t.Run("Swarm service spec "+tt.name, func(t *testing.T) {
@@ -558,6 +567,11 @@ func TestResolve_RefusesHostLevelTargets(t *testing.T) {
 				Name: "local", Options: map[string]string{"type": "nfs", "o": "addr=10.0.0.2,rw", "device": ":/export"}}}},
 		}
 		svc.Spec.TaskTemplate.ContainerSpec.Sysctls = map[string]string{"net.core.somaxconn": "1024", "kernel.shmmax": "68719476736", "fs.mqueue.msg_max": "64"}
+		svc.Spec.TaskTemplate.ContainerSpec.Privileges = &docker.Privileges{
+			Seccomp:        &docker.SeccompOpts{Mode: "custom"},
+			AppArmor:       &docker.AppArmorOpts{Mode: "default"},
+			SELinuxContext: &docker.SELinuxContext{},
+		}
 		swarmService{service: svc, container: "remote", addresses: map[string]string{"net-dokploy": "10.0.1.7/24"}}.add(fake)
 		_, err := newResolver(t, fake).resolve(testContext(t), Target{Kind: KindSwarmService, AppName: "myapp-web"})
 		if err != nil && strings.Contains(err.Error(), "refusing") {
@@ -571,6 +585,131 @@ func TestResolve_RefusesHostLevelTargets(t *testing.T) {
 func bindVolumeMount(name, driver, o, device string) docker.ServiceMount {
 	return docker.ServiceMount{Type: "volume", Source: name, Target: "/data", VolumeOptions: &docker.ServiceVolumeOptions{
 		DriverConfig: &docker.VolumeDriverConfig{Name: driver, Options: map[string]string{"type": "none", "o": o, "device": device}}}}
+}
+
+// TestResolve_JudgesTheDaemonDataRoot covers a daemon configured with a
+// custom data-root: what lives there is as host-reaching as
+// /var/lib/docker.
+func TestResolve_JudgesTheDaemonDataRoot(t *testing.T) {
+	const root = "/data/docker"
+	tests := []struct {
+		name   string
+		ctr    dockertest.Container
+		volume *docker.Volume
+		spec   docker.ContainerSpec
+		unsafe bool
+	}{
+		{name: "bind of the data root", ctr: dockertest.Container{Binds: []string{root + ":/d"}}, unsafe: true},
+		{name: "bind of a directory holding it", ctr: dockertest.Container{Binds: []string{"/data:/d:ro"}}, unsafe: true},
+		{name: "mount of another volume's data", ctr: dockertest.Container{Mounts: []docker.Mount{
+			{Type: "bind", Source: root + "/volumes/other/_data", Destination: "/other"}}}, unsafe: true},
+		{name: "bind volume of the data root", volume: &docker.Volume{Name: "vol", Driver: "local", Mountpoint: root + "/volumes/vol/_data",
+			Options: map[string]string{"type": "none", "o": "bind", "device": root + "/containers"}}, unsafe: true},
+		{name: "spec binding the data root", spec: docker.ContainerSpec{Mounts: []docker.ServiceMount{{Type: "bind", Source: root, Target: "/d"}}}, unsafe: true},
+		{name: "spec creating a bind volume of the data root", spec: docker.ContainerSpec{Mounts: []docker.ServiceMount{bindVolumeMount("v", "local", "bind", root+"/overlay2")}}, unsafe: true},
+		{name: "bind next to the data root", ctr: dockertest.Container{Binds: []string{"/data/app:/app", "/data/docker-backup:/backup"}}},
+		{name: "plain volume under the data root", volume: &docker.Volume{Name: "vol", Driver: "local", Mountpoint: root + "/volumes/vol/_data"}},
+		{name: "spec binding next to the data root", spec: docker.ContainerSpec{Mounts: []docker.ServiceMount{{Type: "bind", Source: "/data/app", Target: "/app"}}}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			fake := newFake(t)
+			fake.SetDockerRootDir(root)
+			c := tt.ctr
+			c.ID, c.Name, c.Running, c.Labels = "c1", "myapp-web.1.x", true, swarmLabels("myapp-web")
+			c.Networks = map[string][]string{"dokploy-network": nil}
+			if tt.volume != nil {
+				fake.AddVolume(*tt.volume)
+				c.Mounts = append(c.Mounts, docker.Mount{Type: "volume", Name: tt.volume.Name, Driver: "local", Source: tt.volume.Mountpoint, Destination: "/vol"})
+			}
+			fake.AddContainer(c)
+			svc := service("s1", "myapp-web")
+			svc.Spec.TaskTemplate.ContainerSpec = tt.spec
+			swarmService{service: svc, container: "c1", addresses: map[string]string{"net-dokploy": "10.0.1.7/24"}}.add(fake)
+			_, err := newResolver(t, fake).resolve(testContext(t), Target{Kind: KindSwarmService, AppName: "myapp-web"})
+			refused := errors.Is(err, ErrTargetUnreachable) && strings.Contains(err.Error(), "refusing")
+			if refused != tt.unsafe || (!tt.unsafe && err != nil) {
+				t.Fatalf("resolve error = %v, want refused = %v", err, tt.unsafe)
+			}
+		})
+	}
+}
+
+// TestResolve_FailsClosedWithoutTheDataRoot: a target that cannot be
+// judged is not forwarded to.
+func TestResolve_FailsClosedWithoutTheDataRoot(t *testing.T) {
+	targets := map[string]Target{
+		"compose": {Kind: KindCompose, AppName: "myapp", Service: "postgres"},
+		"Swarm":   {Kind: KindSwarmService, AppName: "myapp-web"},
+	}
+	for name, target := range targets {
+		t.Run(name, func(t *testing.T) {
+			fake := newFake(t)
+			fake.FailInfo(&docker.APIError{StatusCode: 500, Message: "info unavailable"})
+			fake.AddContainer(dockertest.Container{ID: "c1", Name: "myapp-postgres-1", Running: true, Labels: composeLabels("myapp", "postgres"),
+				Networks: map[string][]string{"myapp_default": nil}})
+			swarmService{service: service("s1", "myapp-web"), container: "remote", addresses: map[string]string{"net-dokploy": "10.0.1.7/24"}}.add(fake)
+			_, err := newResolver(t, fake).resolve(testContext(t), target)
+			if !errors.Is(err, ErrTargetUnreachable) || !strings.Contains(err.Error(), "data root") {
+				t.Fatalf("resolve error = %v, want the target unreachable for want of the data root", err)
+			}
+		})
+	}
+}
+
+// TestResolve_ReadsTheDataRootOnce: concurrent and repeated resolutions
+// share one read of /info.
+func TestResolve_ReadsTheDataRootOnce(t *testing.T) {
+	fake := newFake(t)
+	swarmService{service: service("s1", "myapp-web"), container: "remote", addresses: map[string]string{"net-dokploy": "10.0.1.7/24"}}.add(fake)
+	rs := newResolver(t, fake)
+	ctx := testContext(t)
+	var wg sync.WaitGroup
+	errs := make(chan error, 8)
+	for range 8 {
+		wg.Go(func() {
+			_, err := rs.resolve(ctx, Target{Kind: KindSwarmService, AppName: "myapp-web"})
+			errs <- err
+		})
+	}
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		if err != nil {
+			t.Fatalf("resolve: %v", err)
+		}
+	}
+	if n := fake.InfoRequests(); n != 1 {
+		t.Errorf("/info asked %d times, want 1", n)
+	}
+}
+
+// TestResolve_AcceptsSafeSecurityProfiles: default and custom profiles,
+// and options that only tighten the container, are not refused.
+func TestResolve_AcceptsSafeSecurityProfiles(t *testing.T) {
+	tests := []struct {
+		name string
+		ctr  dockertest.Container
+	}{
+		{"no-new-privileges", dockertest.Container{SecurityOpt: []string{"no-new-privileges"}}},
+		{"no-new-privileges with a value", dockertest.Container{SecurityOpt: []string{"no-new-privileges=true", "no-new-privileges:true"}}},
+		{"AppArmor default profile", dockertest.Container{SecurityOpt: []string{"apparmor=docker-default"}}},
+		{"custom seccomp profile", dockertest.Container{SecurityOpt: []string{`seccomp={"defaultAction":"SCMP_ACT_ERRNO"}`}}},
+		{"SELinux type and level", dockertest.Container{SecurityOpt: []string{"label=type:svirt_apache_t", "label:level:s0:c100,c200"}}},
+		{"default masked paths", dockertest.Container{MaskedPaths: []string{"/proc/kcore", "/sys/firmware"}, ReadonlyPaths: []string{"/proc/sys"}}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			fake := newFake(t)
+			c := tt.ctr
+			c.ID, c.Name, c.Running, c.Labels = "c1", "myapp-postgres-1", true, composeLabels("myapp", "postgres")
+			c.Networks = map[string][]string{"myapp_default": nil}
+			fake.AddContainer(c)
+			if _, err := newResolver(t, fake).resolve(testContext(t), Target{Kind: KindCompose, AppName: "myapp", Service: "postgres"}); err != nil {
+				t.Fatalf("resolve: %v; want the target accepted", err)
+			}
+		})
+	}
 }
 
 // A named volume of the local driver with bind options reports a source
@@ -671,8 +810,27 @@ func TestBindExposesHost(t *testing.T) {
 		{"/srv/app", false},
 	}
 	for _, tt := range tests {
-		if got := bindExposesHost(tt.source); got != tt.want {
+		if got := bindExposesHost(tt.source, "/var/lib/docker"); got != tt.want {
 			t.Errorf("bindExposesHost(%q) = %v, want %v", tt.source, got, tt.want)
+		}
+	}
+	custom := []struct {
+		source string
+		want   bool
+	}{
+		{"/data/docker", true},
+		{"/data/docker/", true},
+		{"/data/docker/overlay2/abc/merged", true},
+		{"/data", true},
+		{"/data/./docker/../docker/containers", true},
+		{"/var/lib/docker", true},
+		{"/data/app", false},
+		{"/data/docker-backup", false},
+		{"/srv/app", false},
+	}
+	for _, tt := range custom {
+		if got := bindExposesHost(tt.source, "/data/docker"); got != tt.want {
+			t.Errorf("bindExposesHost(%q) with data root /data/docker = %v, want %v", tt.source, got, tt.want)
 		}
 	}
 }
@@ -772,6 +930,25 @@ func TestUnsafeContainer(t *testing.T) {
 		{"volume holding a socket at a socket path", ctr(func(c *docker.Container) {
 			c.Mounts = []docker.Mount{{Type: "volume", Source: "/var/lib/docker/volumes/dind/_data", Destination: "/var/run/docker.sock"}}
 		}), true},
+		{"bind of the daemon's custom data root", ctr(func(c *docker.Container) { c.HostConfig.Binds = []string{"/data/docker/containers:/c"} }), true},
+		{"bind next to the daemon's custom data root", ctr(func(c *docker.Container) { c.HostConfig.Binds = []string{"/data/app:/app"} }), false},
+		{"seccomp unconfined", ctr(func(c *docker.Container) { c.HostConfig.SecurityOpt = []string{"seccomp=unconfined"} }), true},
+		{"legacy seccomp unconfined", ctr(func(c *docker.Container) { c.HostConfig.SecurityOpt = []string{"seccomp:unconfined"} }), true},
+		{"AppArmor unconfined", ctr(func(c *docker.Container) {
+			c.HostConfig.SecurityOpt = []string{"no-new-privileges", "apparmor=unconfined"}
+		}), true},
+		{"legacy AppArmor unconfined", ctr(func(c *docker.Container) { c.HostConfig.SecurityOpt = []string{"apparmor:unconfined"} }), true},
+		{"label disabled", ctr(func(c *docker.Container) { c.HostConfig.SecurityOpt = []string{"label=disable"} }), true},
+		{"legacy label disabled", ctr(func(c *docker.Container) { c.HostConfig.SecurityOpt = []string{"label:disable"} }), true},
+		{"bare label disable", ctr(func(c *docker.Container) { c.HostConfig.SecurityOpt = []string{"disable"} }), true},
+		{"system paths unconfined", ctr(func(c *docker.Container) { c.HostConfig.SecurityOpt = []string{"systempaths=unconfined"} }), true},
+		{"masked paths emptied", ctr(func(c *docker.Container) { c.HostConfig.MaskedPaths = []string{} }), true},
+		{"read-only paths emptied", ctr(func(c *docker.Container) { c.HostConfig.ReadonlyPaths = []string{} }), true},
+		{"default profiles", ctr(func(c *docker.Container) {
+			c.HostConfig.SecurityOpt = []string{"apparmor=docker-default", "no-new-privileges:true", "label=level:s0:c1,c2", `seccomp={"defaultAction":"SCMP_ACT_ERRNO"}`}
+			c.HostConfig.MaskedPaths = []string{"/proc/kcore"}
+			c.HostConfig.ReadonlyPaths = []string{"/proc/sys"}
+		}), false},
 		{"safe binds and volumes", ctr(func(c *docker.Container) {
 			c.HostConfig.Binds = []string{"/srv/app:/data", "/runner/data:/runner:ro", "pgdata:/var/lib/postgresql/data"}
 			c.Mounts = []docker.Mount{{Type: "volume", Source: "/var/lib/docker/volumes/pgdata/_data", Destination: "/var/lib/postgresql/data"}}
@@ -779,7 +956,7 @@ func TestUnsafeContainer(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if why := unsafeContainer(tt.ctr); (why != "") != tt.unsafe {
+			if why := unsafeContainer(tt.ctr, "/data/docker"); (why != "") != tt.unsafe {
 				t.Errorf("unsafeContainer() = %q, want unsafe = %v", why, tt.unsafe)
 			}
 		})
