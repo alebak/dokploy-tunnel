@@ -363,3 +363,36 @@ func TestClient_DaemonUnreachable(t *testing.T) {
 		t.Error("Ping to a closed port succeeded")
 	}
 }
+
+func TestClient_Info(t *testing.T) {
+	fake := dockertest.New(t)
+	fake.SetDockerRootDir("/data/docker")
+	c := newClient(t, fake)
+	info, err := c.Info(testContext(t))
+	if err != nil || info.DockerRootDir != "/data/docker" {
+		t.Fatalf("Info = %+v, %v; want DockerRootDir /data/docker", info, err)
+	}
+	fake.FailInfo(&docker.APIError{StatusCode: http.StatusInternalServerError, Message: "boom"})
+	if _, err := c.Info(testContext(t)); err == nil {
+		t.Fatal("Info succeeded while /info fails")
+	}
+}
+
+func TestClient_InspectContainer_SecurityOptions(t *testing.T) {
+	fake := dockertest.New(t)
+	fake.AddContainer(dockertest.Container{ID: "c1", Name: "app", Running: true,
+		SecurityOpt: []string{"seccomp=unconfined"}, MaskedPaths: []string{}})
+	ctr, err := newClient(t, fake).InspectContainer(testContext(t), "c1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Equal(ctr.HostConfig.SecurityOpt, []string{"seccomp=unconfined"}) {
+		t.Errorf("SecurityOpt = %v, want [seccomp=unconfined]", ctr.HostConfig.SecurityOpt)
+	}
+	if ctr.HostConfig.MaskedPaths == nil || len(ctr.HostConfig.MaskedPaths) != 0 {
+		t.Errorf("MaskedPaths = %#v, want an empty, non-nil list", ctr.HostConfig.MaskedPaths)
+	}
+	if ctr.HostConfig.ReadonlyPaths != nil {
+		t.Errorf("ReadonlyPaths = %#v, want nil when the daemon reports none", ctr.HostConfig.ReadonlyPaths)
+	}
+}

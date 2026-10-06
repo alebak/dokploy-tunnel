@@ -79,6 +79,16 @@ type Client struct {
 	mu sync.Mutex
 	// version is the negotiated API version, empty until negotiated.
 	version string
+
+	// now is the clock of the data root cache.
+	now func() time.Time
+	// rootDirSem admits one caller of DockerRootDir at a time; holding it
+	// guards rootDir and rootDirAt.
+	rootDirSem chan struct{}
+	// rootDir is the data root last read from the daemon, at rootDirAt;
+	// empty until read.
+	rootDir   string
+	rootDirAt time.Time
 }
 
 // New returns a client for the daemon at host, such as
@@ -120,7 +130,7 @@ func New(host string) (*Client, error) {
 		MaxIdleConns:    8,
 		IdleConnTimeout: 30 * time.Second,
 	}
-	return &Client{base: base, dial: dial, http: &http.Client{Transport: transport}}, nil
+	return &Client{base: base, dial: dial, http: &http.Client{Transport: transport}, now: time.Now, rootDirSem: make(chan struct{}, 1)}, nil
 }
 
 // APIVersion returns the negotiated API version, or "" before the first
