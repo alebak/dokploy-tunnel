@@ -63,10 +63,11 @@ A context is one Dokploy panel plus one organization in it. doktunnel authentica
 
 | Command | Purpose |
 |---------|---------|
-| `doktunnel context add --url <URL> --name <name>` | Validate an API key and register the panel and organization. The first context becomes the current one. |
-| `doktunnel context list` | List contexts; the current one is marked with `*`. |
+| `doktunnel context add --url <URL> --name <name>` | Validate an API key and register the panel and organization. The first context becomes the current one. `--companion-url <URL>` sets the [companion URL](#companion-url) when it is not the default. |
+| `doktunnel context list` | List contexts with their companion URL; the current one is marked with `*`. |
 | `doktunnel context use <name>` | Make a context current. |
 | `doktunnel context remove <name>` | Remove a context and delete its key from the keyring. Revoke the key in Dokploy too if you no longer need it. |
+| `doktunnel context set-companion <name> <URL>` | Change a context's companion URL without adding it again. |
 
 Every other command uses the current context; `--context <name>` picks another one for a single invocation.
 
@@ -81,9 +82,17 @@ DOKTUNNEL_API_KEY="$(pass show dokploy/prod)" doktunnel context add --url https:
 
 **Plain HTTP.** With an `http://` URL the API key and all traffic cross the network unencrypted, and `context add` prints a warning (in `--json` mode, the warning is in the result's `warnings` list instead). Use `https://` unless the network is trusted, such as a LAN or a VPN.
 
-**Proxies.** Requests to Dokploy honor the `HTTPS_PROXY`, `HTTP_PROXY`, and `NO_PROXY` environment variables.
+<a id="companion-url"></a>**Companion URL.** Each context also stores the address of the server's [companion](#companion-server). By convention the companion is published under the panel's own address, so the default is the panel URL followed by `/doktunnel`: `https://dokploy.example.com/doktunnel`, or `http://192.168.1.20:3000/doktunnel` for a panel on a port. Once the API key is accepted, `context add` checks the companion with a `GET <companion URL>/healthz` request that carries no API key and expects `{"status":"ok"}`. If the companion does not answer (not installed yet, published elsewhere, or unreachable), the URL is stored anyway and `context add` prints a warning. Pass `--companion-url` when the companion lives at another address, or fix it later with `set-companion`, which runs the same check:
 
-With `--json`, `add` and `use` print the context as `{"name","url","organization_id","organization_name","current"}` (plus `warnings` when there are any), `list` prints `{"current_context":"...","contexts":[...]}`, and `remove` prints `{"name":"...","removed":true}`. An invalid key fails with `permission_denied`; a panel that cannot be reached, or that does not answer like Dokploy, fails with `unreachable`.
+```sh
+doktunnel context set-companion prod https://tunnel.example.com
+```
+
+A plain `http://` companion URL gets the same warning as a plain `http://` panel, since tunnels send the API key to the companion. Contexts added by older versions have no companion URL; `context list` shows `-` for them, and `set-companion` adds one.
+
+**Proxies.** Requests to Dokploy and to the companion honor the `HTTPS_PROXY`, `HTTP_PROXY`, and `NO_PROXY` environment variables.
+
+With `--json`, `add`, `use` and `set-companion` print the context as `{"name","url","organization_id","organization_name","companion_url","current"}` (plus `warnings` when there are any), `list` prints `{"current_context":"...","contexts":[...]}`, and `remove` prints `{"name":"...","removed":true}`. An invalid key fails with `permission_denied`; a panel that cannot be reached, or that does not answer like Dokploy, fails with `unreachable`.
 
 ### Services
 

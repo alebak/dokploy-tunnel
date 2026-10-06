@@ -85,8 +85,8 @@ func (f *fakeAPI) ComposeServices(ctx context.Context, composeID string) ([]stri
 	return nil, fmt.Errorf("%w (compose.loadServices)", dokploy.ErrNotFound)
 }
 
-// contextHarness is an App wired to a temp config file, an in-memory keyring
-// and a fake Dokploy API.
+// contextHarness is an App wired to a temp config file, an in-memory keyring,
+// a fake Dokploy API and a fake companion probe.
 type contextHarness struct {
 	t          *testing.T
 	configPath string
@@ -94,16 +94,27 @@ type contextHarness struct {
 	api        *fakeAPI
 	env        map[string]string
 	secret     string
+	// probe checks a companion URL; nil means the real HTTP probe.
+	probe func(ctx context.Context, u *url.URL) error
+	// probeErr is what the default fake probe returns.
+	probeErr error
+	// probed lists the URLs the default fake probe was asked about.
+	probed []string
 }
 
 func newContextHarness(t *testing.T) *contextHarness {
-	return &contextHarness{
+	h := &contextHarness{
 		t:          t,
 		configPath: filepath.Join(t.TempDir(), "doktunnel", "config.json"),
 		keyring:    keyring.NewMemory(),
 		api:        &fakeAPI{org: dokploy.Organization{ID: "org1", Name: "Acme"}},
 		env:        map[string]string{},
 	}
+	h.probe = func(_ context.Context, u *url.URL) error {
+		h.probed = append(h.probed, u.String())
+		return h.probeErr
+	}
+	return h
 }
 
 func (h *contextHarness) run(stdin string, terminal bool, args ...string) result {
@@ -121,8 +132,9 @@ func (h *contextHarness) run(stdin string, terminal bool, args ...string) result
 			h.api.base, h.api.key = base.String(), apiKey
 			return h.api
 		},
-		ReadSecret: func() (string, error) { return h.secret, nil },
-		Getenv:     func(k string) string { return h.env[k] },
+		ReadSecret:     func() (string, error) { return h.secret, nil },
+		Getenv:         func(k string) string { return h.env[k] },
+		ProbeCompanion: h.probe,
 	}
 	exit := app.Run(args)
 	return result{exit: exit, stdout: stdout.String(), stderr: stderr.String()}
@@ -398,8 +410,13 @@ func TestContextList(t *testing.T) {
 		t.Errorf("list = %+v, want prod and staging with staging current", got)
 	}
 
+	if got.Contexts[0].CompanionURL != "https://a/doktunnel" || got.Contexts[1].CompanionURL != "https://b/doktunnel" {
+		t.Errorf("companion URLs = %q, %q, want the convention under each panel",
+			got.Contexts[0].CompanionURL, got.Contexts[1].CompanionURL)
+	}
+
 	human := h.mustRun("", "context", "list").stdout
-	for _, want := range []string{"CURRENT", "NAME", "ORGANIZATION", "*", "staging", "https://b", "Acme"} {
+	for _, want := range []string{"CURRENT", "NAME", "ORGANIZATION", "COMPANION", "*", "staging", "https://b", "Acme", "https://b/doktunnel"} {
 		if !strings.Contains(human, want) {
 			t.Errorf("human list does not contain %q:\n%s", want, human)
 		}

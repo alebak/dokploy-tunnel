@@ -2,6 +2,7 @@ package cli
 
 import (
 	"bufio"
+	"context"
 	"errors"
 	"flag"
 	"fmt"
@@ -60,6 +61,9 @@ type App struct {
 	Executable func() (string, error)
 	// WriteHosts replaces the hosts file; nil means hosts.Write.
 	WriteHosts func(path string, data []byte) error
+	// ProbeCompanion checks that a doktunnel companion answers at a URL;
+	// nil means an HTTP health check.
+	ProbeCompanion func(ctx context.Context, u *url.URL) error
 }
 
 // Run executes the command selected by args (without the program name) and
@@ -153,6 +157,8 @@ func (a *App) env(g Globals) *Env {
 		Loopback:     a.Loopback,
 		Executable:   a.Executable,
 		WriteHosts:   a.WriteHosts,
+
+		ProbeCompanion: a.ProbeCompanion,
 	}
 	env.NoInput = env.NoInput || !a.StdinIsTerminal
 	env.Input = prompt.New(!env.NoInput, stdin, a.Stderr)

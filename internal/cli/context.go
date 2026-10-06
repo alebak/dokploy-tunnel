@@ -28,8 +28,10 @@ type contextJSON struct {
 	URL              string `json:"url"`
 	OrganizationID   string `json:"organization_id"`
 	OrganizationName string `json:"organization_name"`
-	Current          bool   `json:"current"`
-	// Warnings is set only by "context add".
+	// CompanionURL is empty for contexts added before it was stored.
+	CompanionURL string `json:"companion_url"`
+	Current      bool   `json:"current"`
+	// Warnings is set only by "context add" and "context set-companion".
 	Warnings []string `json:"warnings,omitempty"`
 }
 
@@ -39,6 +41,7 @@ func toJSON(c config.Context, current string) contextJSON {
 		URL:              c.URL,
 		OrganizationID:   c.OrganizationID,
 		OrganizationName: c.OrganizationName,
+		CompanionURL:     c.CompanionURL,
 		Current:          c.Name == current,
 	}
 }
@@ -55,7 +58,8 @@ func newContextCommand() *Command {
 				Name:    "list",
 				Summary: "List contexts and mark the current one",
 				Description: "JSON output: `{\"current_context\":\"<name or empty>\",\"contexts\":[<context>, ...]}`, where each " +
-					"context has the fields `name`, `url`, `organization_id`, `organization_name` and `current`.",
+					"context has the fields `name`, `url`, `organization_id`, `organization_name`, `companion_url` and `current`. " +
+					"`companion_url` is empty for contexts added before doktunnel stored it.",
 				Run: runContextList,
 			},
 			{
@@ -74,12 +78,21 @@ func newContextCommand() *Command {
 				Args: "<name>",
 				Run:  runContextRemove,
 			},
+			{
+				Name:    "set-companion",
+				Summary: "Change the doktunnel companion URL of a context",
+				Description: "Use it when the server's companion is not published at the conventional `<panel URL>/doktunnel`. " +
+					"The companion's health check is probed like in 'context add'; the URL is stored even when the check fails, " +
+					"with a warning. JSON output: the context, plus a `warnings` list of strings when there are warnings.",
+				Args: "<name> <URL>",
+				Run:  runContextSetCompanion,
+			},
 		},
 	}
 }
 
 func newContextAddCommand() *Command {
-	var rawURL, name string
+	var rawURL, name, companionURL string
 	var keyFromStdin bool
 	return &Command{
 		Name:    "add",
@@ -88,24 +101,29 @@ func newContextAddCommand() *Command {
 			"The key is read from a hidden prompt, from stdin with `--api-key-stdin`, or from the `" + apiKeyEnv +
 			"` environment variable. It is never accepted as a flag value, because flag values end up in shell history " +
 			"and process listings. The first context added becomes the current one. " +
-			"JSON output: the context, with the fields `name`, `url`, `organization_id`, `organization_name` and `current`, " +
-			"plus a `warnings` list of strings when there are warnings, such as for a plain `http://` URL.",
+			"Once the key is accepted, the server's doktunnel companion is probed at `--companion-url`, by default " +
+			"`<panel URL>/doktunnel`, with a request to its `/healthz` endpoint that carries no credentials. " +
+			"The companion URL is stored even when the probe fails; the failure is reported as a warning. " +
+			"JSON output: the context, with the fields `name`, `url`, `organization_id`, `organization_name`, `companion_url` and `current`, " +
+			"plus a `warnings` list of strings when there are warnings, such as for a plain `http://` URL or an unreachable companion.",
 		Flags: func(fs *flag.FlagSet) {
 			fs.StringVar(&rawURL, "url", "", "Dokploy panel `URL`, such as https://dokploy.example.com or http://192.168.1.20:3000")
 			fs.StringVar(&name, "name", "", "context `name` (alias): letters, digits, '.', '_' or '-'")
 			fs.BoolVar(&keyFromStdin, "api-key-stdin", false, "read the API key from the first line of stdin")
+			fs.StringVar(&companionURL, "companion-url", "",
+				"doktunnel companion `URL`, when it is not published at the panel URL followed by /doktunnel")
 		},
 		Run: func(env *Env, args []string) error {
 			if len(args) > 0 {
 				return clierr.Newf(clierr.InvalidArgument, "unexpected argument %q", args[0]).
 					WithHint("pass the panel URL with --url and the alias with --name")
 			}
-			return runContextAdd(env, rawURL, name, keyFromStdin)
+			return runContextAdd(env, rawURL, name, companionURL, keyFromStdin)
 		},
 	}
 }
 
-func runContextAdd(env *Env, rawURL, name string, keyFromStdin bool) error {
+func runContextAdd(env *Env, rawURL, name, rawCompanionURL string, keyFromStdin bool) error {
 	var err error
 	if rawURL == "" {
 		if rawURL, err = env.Input.Ask(prompt.Request{Flag: "url", Label: "Dokploy panel URL"}); err != nil {
@@ -117,14 +135,17 @@ func runContextAdd(env *Env, rawURL, name string, keyFromStdin bool) error {
 		return clierr.New(clierr.InvalidArgument, err.Error()).
 			WithHint("pass --url with the address of the Dokploy panel, such as https://dokploy.example.com")
 	}
+	companion := defaultCompanionURL(base)
+	if rawCompanionURL != "" {
+		if companion, err = parseCompanionURL(rawCompanionURL); err != nil {
+			return err
+		}
+	}
 	var warnings []string
 	if base.Scheme == "http" {
 		w := "the panel URL uses plain http://, so the API key and all traffic travel unencrypted; use https:// unless the network is trusted"
 		warnings = append(warnings, w)
-		// In JSON mode stderr stays silent; the warning is part of the result.
-		if !env.JSON {
-			fmt.Fprintf(env.Stderr, "warning: %s\n", w)
-		}
+		env.warn(w)
 	}
 
 	if name == "" {
@@ -156,7 +177,20 @@ func runContextAdd(env *Env, rawURL, name string, keyFromStdin bool) error {
 		return apiError(base.String(), err)
 	}
 
-	ctx := config.Context{Name: name, URL: base.String(), OrganizationID: org.ID, OrganizationName: org.Name}
+	// The panel warning already covers a companion URL derived from it.
+	companionWarnings := env.companionWarnings(name, companion, rawCompanionURL != "" || base.Scheme != "http")
+	for _, w := range companionWarnings {
+		env.warn(w)
+	}
+	warnings = append(warnings, companionWarnings...)
+
+	ctx := config.Context{
+		Name:             name,
+		URL:              base.String(),
+		OrganizationID:   org.ID,
+		OrganizationName: org.Name,
+		CompanionURL:     companion.String(),
+	}
 	if err := cfg.Add(ctx); err != nil {
 		return fmt.Errorf("adding context: %w", err)
 	}
@@ -183,6 +217,14 @@ func runContextAdd(env *Env, rawURL, name string, keyFromStdin bool) error {
 		_, err = fmt.Fprintf(env.Stdout, "It is now the current context.\n")
 	}
 	return err
+}
+
+// warn reports a non-fatal problem on stderr. In JSON mode stderr stays
+// silent; commands put their warnings in the result instead.
+func (e *Env) warn(w string) {
+	if !e.JSON {
+		fmt.Fprintf(e.Stderr, "warning: %s\n", w)
+	}
 }
 
 // apiKey returns the API key for "context add" from stdin (--api-key-stdin),
@@ -245,13 +287,17 @@ func runContextList(env *Env, args []string) error {
 		return err
 	}
 	tw := tabwriter.NewWriter(env.Stdout, 0, 0, 2, ' ', 0)
-	fmt.Fprintln(tw, "CURRENT\tNAME\tURL\tORGANIZATION")
+	fmt.Fprintln(tw, "CURRENT\tNAME\tURL\tORGANIZATION\tCOMPANION")
 	for _, c := range cfg.Contexts {
 		mark := ""
 		if c.Name == cfg.Current {
 			mark = "*"
 		}
-		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\n", mark, c.Name, c.URL, c.OrganizationName)
+		companion := c.CompanionURL
+		if companion == "" {
+			companion = "-"
+		}
+		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\n", mark, c.Name, c.URL, c.OrganizationName, companion)
 	}
 	if err := tw.Flush(); err != nil {
 		return fmt.Errorf("writing context list: %w", err)
@@ -316,6 +362,45 @@ func runContextRemove(env *Env, args []string) error {
 	if err == nil && wasCurrent {
 		_, err = fmt.Fprintln(env.Stdout, "No context is current now; select one with 'doktunnel context use <name>'.")
 	}
+	return err
+}
+
+func runContextSetCompanion(env *Env, args []string) error {
+	if len(args) != 2 {
+		return clierr.Newf(clierr.InvalidArgument, "expected a context name and a companion URL, got %d arguments", len(args)).
+			WithHint("usage: doktunnel context set-companion <name> <URL>; run 'doktunnel context list' to see the names")
+	}
+	name := args[0]
+	companion, err := parseCompanionURL(args[1])
+	if err != nil {
+		return err
+	}
+	cfg, err := env.loadConfig()
+	if err != nil {
+		return err
+	}
+	if _, ok := cfg.Find(name); !ok {
+		return notFoundError(name)
+	}
+
+	warnings := env.companionWarnings(name, companion, true)
+	for _, w := range warnings {
+		env.warn(w)
+	}
+	if err := cfg.SetCompanionURL(name, companion.String()); err != nil {
+		return notFoundError(name)
+	}
+	if err := cfg.Save(env.configPath()); err != nil {
+		return err
+	}
+
+	ctx, _ := cfg.Find(name)
+	out := toJSON(ctx, cfg.Current)
+	out.Warnings = warnings
+	if env.JSON {
+		return output.WriteJSON(env.Stdout, out)
+	}
+	_, err = fmt.Fprintf(env.Stdout, "Set the companion URL of context %q to %s.\n", name, ctx.CompanionURL)
 	return err
 }
 

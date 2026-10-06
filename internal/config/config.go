@@ -51,6 +51,10 @@ type Context struct {
 	OrganizationID string `json:"organization_id"`
 	// OrganizationName is that organization's display name when added.
 	OrganizationName string `json:"organization_name"`
+	// CompanionURL is the base URL of the server's doktunnel-companion,
+	// such as https://dokploy.example.com/doktunnel. It is empty for
+	// contexts added before doktunnel stored it.
+	CompanionURL string `json:"companion_url,omitempty"`
 }
 
 // Config is the on-disk config file.
@@ -203,6 +207,17 @@ func (c *Config) Remove(name string) error {
 	if c.Current == name {
 		c.Current = ""
 	}
+	return nil
+}
+
+// SetCompanionURL sets the companion URL of the context called name, or
+// returns ErrNotFound.
+func (c *Config) SetCompanionURL(name, companionURL string) error {
+	i := c.index(name)
+	if i < 0 {
+		return fmt.Errorf("%w: %q", ErrNotFound, name)
+	}
+	c.Contexts[i].CompanionURL = companionURL
 	return nil
 }
 
