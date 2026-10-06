@@ -57,7 +57,7 @@ The image is based on distroless `static` and runs as its `nonroot` user (65532)
 
 The image sets `DOKTUNNEL_COMPANION_REPEATER_KEY_FILE=/var/lib/doktunnel/repeater.key` and declares `/var/lib/doktunnel` as a volume. Mount a named volume there, so the repeater key survives a recreated container.
 
-The same two binaries are also attached to each release as `doktunnel-companion_<version>_linux_<arch>.tar.gz` archives. A full installation guide for a Dokploy server is in progress.
+The same two binaries are also attached to each release as `doktunnel-companion_<version>_linux_<arch>.tar.gz` archives. To install the companion and its socket proxy on a Dokploy server, follow [Install the companion on a Dokploy server](docs/install-companion.md).
 
 ## Usage
 
@@ -269,7 +269,7 @@ doktunnel --skill > <agent skills dir>/doktunnel/SKILL.md
 
 `doktunnel-companion` is the server-side half of dokploy-tunnel. A Dokploy administrator installs one on each Dokploy server whose services should be reachable: on the Dokploy server itself, and on each remote server Dokploy deploys to. `doktunnel` opens one WebSocket to it for every local TCP connection; the [wire protocol](docs/protocol.md) is documented separately.
 
-> **Work in progress.** The companion forwards through Docker, but a supported installation method will be documented once the whole path is verified end to end.
+> **Install:** see [Install the companion on a Dokploy server](docs/install-companion.md): one Dokploy compose service with the companion and its [socket proxy](#socket-proxy), published at `<panel-domain>/doktunnel`.
 
 It is configured with flags or environment variables; flags win:
 
