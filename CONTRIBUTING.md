@@ -73,7 +73,7 @@ Write commit messages in English, with a lowercase subject and no trailing perio
 1. Every push to `main` runs [release-please](https://github.com/googleapis/release-please), which opens or updates a release PR with the next version and the generated `CHANGELOG.md` entries.
 2. A maintainer merges the release PR when ready to ship.
 3. release-please tags the commit (`vX.Y.Z`) and creates the GitHub release.
-4. In the same workflow run, [GoReleaser](https://goreleaser.com) builds `doktunnel` and `doktunnel-companion`, uploads the archives and `checksums.txt`, and appends download and install instructions to the release notes.
+4. In the same workflow run, [GoReleaser](https://goreleaser.com) builds `doktunnel`, `doktunnel-companion` and `doktunnel-socket-proxy`, uploads the archives and `checksums.txt`, publishes the multi-arch `ghcr.io/alebak/doktunnel-companion` image with the release version tag (and `latest` for non-prereleases), and appends download and install instructions to the release notes.
 
 Do not edit `CHANGELOG.md` or create tags by hand.
 
