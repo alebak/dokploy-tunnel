@@ -74,11 +74,13 @@ jobs:
         if: ${{ !cancelled() }}
         run: go test -tags platform -count=1 -v -run TestHosts ./internal/platformtest/
 
+      # The container image is verified by the image workflow; macOS and
+      # Windows runners have no Linux Docker daemon to build it.
       - name: Build snapshot release artifacts
         if: ${{ !cancelled() }}
         uses: goreleaser/goreleaser-action@v7
         with:
-          args: release --snapshot --clean
+          args: release --snapshot --clean --skip=docker
 
       # Serves the archives twice from 127.0.0.1: "good" as built, and "bad"
       # with every checksum replaced, which the installers must refuse.
