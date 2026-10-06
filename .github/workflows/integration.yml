@@ -56,16 +56,57 @@ jobs:
         run: go test -tags integration -count=1 -race -v -run '^TestIntegration_' ./internal/repeater/
 
       - name: No repeater left behind
-        run: |
+        run: &no-repeater-left |
           left="$(docker ps -aq --filter label=dev.doktunnel.repeater=1)"
           if [ -n "$left" ]; then
             docker ps -a --filter label=dev.doktunnel.repeater=1
             exit 1
           fi
 
+      # The proxy, in process in front of the daemon, refuses what is not on
+      # its allow-list.
+      - name: Socket proxy denials
+        env:
+          DOKTUNNEL_INTEGRATION: "1"
+        run: go test -tags integration -count=1 -race -v -run '^TestIntegration_' ./internal/dockerproxy/
+
+      - name: No container left behind by the denial tests
+        run: *no-repeater-left
+
+      # The same suite again, with the repeater reaching Docker only through
+      # doktunnel-socket-proxy, as the companion does once installed.
+      - name: Start the socket proxy
+        run: |
+          go build -o "$RUNNER_TEMP/doktunnel-socket-proxy" ./cmd/doktunnel-socket-proxy
+          nohup "$RUNNER_TEMP/doktunnel-socket-proxy" --listen 127.0.0.1:2375 --repeater-image "$REPEATER_IMAGE" \
+            >"$RUNNER_TEMP/socket-proxy.log" 2>&1 &
+          for _ in $(seq 30); do
+            curl -fsS http://127.0.0.1:2375/_ping && exit 0
+            sleep 1
+          done
+          cat "$RUNNER_TEMP/socket-proxy.log"
+          exit 1
+
+      - name: Integration tests through the socket proxy
+        env:
+          DOKTUNNEL_INTEGRATION: "1"
+          DOCKER_HOST: tcp://127.0.0.1:2375
+        run: go test -tags integration -count=1 -race -v -run '^TestIntegration_' ./internal/repeater/
+
+      - name: No repeater left behind through the socket proxy
+        run: *no-repeater-left
+
+      # Every call the companion makes is on the allow-list.
+      - name: No companion call denied
+        run: |
+          if grep 'request denied' "$RUNNER_TEMP/socket-proxy.log"; then
+            exit 1
+          fi
+
       - name: Diagnostics
         if: ${{ failure() }}
         run: |
+          cat "$RUNNER_TEMP/socket-proxy.log" || true
           docker ps -a
           docker network ls
           docker service ps doktunnel-it-web doktunnel-it-closed --no-trunc || true
