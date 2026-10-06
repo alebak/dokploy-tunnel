@@ -261,14 +261,8 @@ func (rs resolver) locateSwarm(ctx context.Context, t Target) (located, error) {
 	}
 	// A task on another node cannot be inspected: the spec is all there
 	// is to judge it by.
-	spec := svc.Spec.TaskTemplate.ContainerSpec
-	for _, m := range spec.Mounts {
-		if mountExposesHost(m.Source) || isSocketPath(m.Target) {
-			return located{}, fmt.Errorf("%w: refusing Swarm service %s: %s", ErrTargetUnreachable, name, mountsDaemonSocket)
-		}
-	}
-	if c := dangerousCapability(spec.CapabilityAdd); c != "" {
-		return located{}, fmt.Errorf("%w: refusing Swarm service %s: it adds capability %s", ErrTargetUnreachable, name, c)
+	if why := unsafeServiceSpec(svc.Spec.TaskTemplate.ContainerSpec); why != "" {
+		return located{}, fmt.Errorf("%w: refusing Swarm service %s: %s", ErrTargetUnreachable, name, why)
 	}
 
 	tasks, err := rs.docker.ListTasks(ctx, docker.TaskListOptions{Service: svc.ID, DesiredState: "running"})
@@ -290,7 +284,11 @@ func (rs resolver) locateSwarm(ctx context.Context, t Target) (located, error) {
 		ctr, err := rs.docker.InspectContainer(ctx, id)
 		switch {
 		case err == nil:
-			if why := unsafeContainer(ctr); why != "" {
+			why, err := rs.unsafeTarget(ctx, ctr)
+			if err != nil {
+				return located{}, fmt.Errorf("%w: judging the task container of %s: %v", ErrTargetUnreachable, name, err)
+			}
+			if why != "" {
 				return located{}, fmt.Errorf("%w: refusing Swarm service %s: %s", ErrTargetUnreachable, name, why)
 			}
 			loc.ep.ContainerID = ctr.ID
@@ -350,7 +348,11 @@ func (rs resolver) locateCompose(ctx context.Context, t Target) (located, error)
 		}
 	}
 	for _, ctr := range accepted {
-		if why := unsafeContainer(ctr); why != "" {
+		why, err := rs.unsafeTarget(ctx, ctr)
+		if err != nil {
+			return located{}, fmt.Errorf("%w: judging the target's container: %v", ErrTargetUnreachable, err)
+		}
+		if why != "" {
 			return located{}, fmt.Errorf("%w: refusing %s: %s", ErrTargetUnreachable, t, why)
 		}
 	}
@@ -410,12 +412,42 @@ func networkIDs(ctr docker.Container) []string {
 	return ids
 }
 
+// unsafeTarget returns why the companion must not forward to ctr, or "":
+// the reasons of unsafeContainer, and named volumes that reach the host.
+// It fails when a volume cannot be inspected.
+func (rs resolver) unsafeTarget(ctx context.Context, ctr docker.Container) (string, error) {
+	if why := unsafeContainer(ctr); why != "" {
+		return why, nil
+	}
+	for _, m := range ctr.Mounts {
+		if m.Type != "volume" {
+			continue
+		}
+		if m.Name == "" {
+			return "it mounts a volume without a name", nil
+		}
+		v, err := rs.docker.InspectVolume(ctx, m.Name)
+		if docker.IsNotFound(err) {
+			return "it mounts volume " + m.Name + ", which the daemon does not report", nil
+		}
+		if err != nil {
+			return "", fmt.Errorf("inspecting volume %s: %v", m.Name, err)
+		}
+		if volumeExposesHost(v.Driver, v.Options) {
+			return mountsHostPath, nil
+		}
+	}
+	return "", nil
+}
+
 // unsafeContainer returns why the companion must not forward to ctr, or
-// "". A privileged container, one sharing the host's network or PID
-// namespace, one given host devices or capabilities that reach past the
-// container, or one that can reach a container daemon's socket is host
+// "", judging by its inspection alone. A privileged container, one sharing
+// the host's network, PID, IPC or UTS namespace, one given host devices,
+// capabilities or kernel parameters that reach past the container, or one
+// that can reach a container daemon's socket or data is host
 // infrastructure, such as a Docker socket proxy: a tunnel to it would hand
-// whoever may read the Dokploy service control of the host.
+// whoever may read the Dokploy service control of the host. Named volumes
+// are judged by unsafeTarget.
 func unsafeContainer(ctr docker.Container) string {
 	hc := ctr.HostConfig
 	switch {
@@ -425,28 +457,102 @@ func unsafeContainer(ctr docker.Container) string {
 		return "it uses the host's network"
 	case hc.PidMode == "host":
 		return "it uses the host's PID namespace"
-	case len(hc.Devices) > 0:
+	case hc.IpcMode == "host":
+		return "it uses the host's IPC namespace"
+	case hc.UTSMode == "host":
+		return "it uses the host's UTS namespace"
+	case len(hc.Devices) > 0, len(hc.DeviceRequests) > 0:
 		return "it is given host devices"
 	}
 	if c := dangerousCapability(hc.CapAdd); c != "" {
 		return "it adds capability " + c
 	}
+	if k := hostSysctl(hc.Sysctls); k != "" {
+		return "it sets kernel parameter " + k
+	}
 	for _, m := range ctr.Mounts {
-		if mountExposesHost(m.Source) || isSocketPath(m.Destination) {
-			return mountsDaemonSocket
+		// A volume's source is its mountpoint in the daemon's data root;
+		// what it mounts is judged from the volume itself.
+		exposes := bindExposesHost
+		if m.Type == "volume" {
+			exposes = mountExposesHost
+		}
+		if exposes(m.Source) || isSocketPath(m.Destination) {
+			return mountsHostPath
 		}
 	}
 	for _, b := range hc.Binds {
 		src, rest, _ := strings.Cut(b, ":")
 		dst, _, _ := strings.Cut(rest, ":")
-		if mountExposesHost(src) || isSocketPath(dst) {
-			return mountsDaemonSocket
+		if bindExposesHost(src) || isSocketPath(dst) {
+			return mountsHostPath
 		}
 	}
 	return ""
 }
 
-const mountsDaemonSocket = "it mounts a daemon socket or a directory that may hold one"
+// unsafeServiceSpec returns why the companion must not forward to the
+// tasks of a Swarm service with spec, or "". A task on another node cannot
+// be inspected, so the spec is judged with the rules of unsafeContainer
+// that it can express. Swarm has no privileged mode, host namespaces,
+// device mappings or device requests to check.
+func unsafeServiceSpec(spec docker.ContainerSpec) string {
+	for _, m := range spec.Mounts {
+		if isSocketPath(m.Target) {
+			return mountsHostPath
+		}
+		if m.Type != "volume" {
+			if bindExposesHost(m.Source) {
+				return mountsHostPath
+			}
+			continue
+		}
+		// Each node creates a missing volume from the driver config.
+		if dc := volumeDriverConfig(m); dc != nil && volumeExposesHost(dc.Name, dc.Options) {
+			return mountsHostPath
+		}
+	}
+	if c := dangerousCapability(spec.CapabilityAdd); c != "" {
+		return "it adds capability " + c
+	}
+	if k := hostSysctl(spec.Sysctls); k != "" {
+		return "it sets kernel parameter " + k
+	}
+	return ""
+}
+
+// volumeDriverConfig is the driver config of a Swarm volume mount, or nil.
+func volumeDriverConfig(m docker.ServiceMount) *docker.VolumeDriverConfig {
+	if m.VolumeOptions == nil {
+		return nil
+	}
+	return m.VolumeOptions.DriverConfig
+}
+
+const mountsHostPath = "it mounts a daemon socket, a directory that may hold one, a daemon's data or a host device"
+
+// volumeExposesHost reports whether a volume of driver with options
+// mounts a host path or device. The local driver, also used when driver
+// is empty, passes "o" to mount(8): with "bind" or "rbind" it binds the
+// host path "device", judged as a bind mount; without, an absolute
+// "device" is a host block device, such as a disk holding the host's
+// root file system. NFS, CIFS (device "//server/share") and tmpfs volumes
+// name no host path. A bind whose device is not an absolute path cannot be
+// judged and is refused.
+func volumeExposesHost(driver string, options map[string]string) bool {
+	if driver != "" && driver != "local" {
+		return false
+	}
+	device := options["device"]
+	binds := slices.ContainsFunc(strings.Split(options["o"], ","), func(o string) bool {
+		o = strings.TrimSpace(o)
+		return o == "bind" || o == "rbind"
+	})
+	if binds {
+		return !path.IsAbs(device) || bindExposesHost(device)
+	}
+	return path.IsAbs(device) && !strings.HasPrefix(device, "//")
+}
 
 // daemonSockets are where container daemons listen. /var/run is a link to
 // /run on current distributions, but a mount names whichever path it was
@@ -485,6 +591,58 @@ func mountExposesHost(src string) bool {
 		}
 	}
 	return false
+}
+
+// daemonDataRoots are the default data roots of container daemons, holding
+// every container's file system, image and volume: Docker's, containerd's
+// and Podman's (shared with CRI-O).
+var daemonDataRoots = []string{"/var/lib/docker", "/var/lib/containerd", "/var/lib/containers"}
+
+// rootlessDataRoot ends the default data root of a rootless daemon,
+// $HOME/.local/share/docker.
+const rootlessDataRoot = "/.local/share/docker"
+
+// bindExposesHost reports whether binding the host path src into a
+// container could hand it control of the host: mountExposesHost, or src
+// is a daemon data root, a path inside one or a directory holding one. The
+// rootless data root is recognized by its default location in any home
+// directory; a bind of a whole home directory is not. A volume's source
+// is under a data root, so volumes are judged by mountExposesHost.
+func bindExposesHost(src string) bool {
+	if mountExposesHost(src) {
+		return true
+	}
+	if !path.IsAbs(src) {
+		return false
+	}
+	src = path.Clean(src)
+	for _, d := range daemonDataRoots {
+		if within(d, src) || within(src, d) {
+			return true
+		}
+	}
+	return strings.Contains(src+"/", rootlessDataRoot+"/") ||
+		strings.HasSuffix(src, "/.local") || strings.HasSuffix(src, "/.local/share")
+}
+
+// ipcSysctls are the kernel parameters scoped to a container's own IPC
+// namespace, as runc allows them.
+var ipcSysctls = []string{
+	"kernel.msgmax", "kernel.msgmnb", "kernel.msgmni", "kernel.sem",
+	"kernel.shmall", "kernel.shmmax", "kernel.shmmni", "kernel.shm_rmid_forced",
+}
+
+// hostSysctl returns the first of sysctls, sorted, that is not scoped to
+// the container's own namespaces, or "". IPC and fs.mqueue parameters are
+// scoped to the IPC namespace and net ones to the network namespace;
+// sharing the host's namespaces is refused separately.
+func hostSysctl(sysctls map[string]string) string {
+	for _, k := range slices.Sorted(maps.Keys(sysctls)) {
+		if !slices.Contains(ipcSysctls, k) && !strings.HasPrefix(k, "fs.mqueue.") && !strings.HasPrefix(k, "net.") {
+			return k
+		}
+	}
+	return ""
 }
 
 // isSocketPath reports whether p names a Unix socket by convention.

@@ -87,6 +87,7 @@ type Fake struct {
 	containers map[string]*docker.Container
 	networks   map[string]docker.Network
 	services   map[string]docker.Service
+	volumes    map[string]docker.Volume
 	tasks      []docker.Task
 	nextIP     int
 	volumeRMs  int
@@ -108,6 +109,7 @@ func New(t testing.TB) *Fake {
 		containers: map[string]*docker.Container{},
 		networks:   map[string]docker.Network{},
 		services:   map[string]docker.Service{},
+		volumes:    map[string]docker.Volume{},
 		images:     map[string]bool{},
 		execs:      map[string]ExecConfig{},
 	}
@@ -176,6 +178,13 @@ func (f *Fake) AddService(s docker.Service) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.services[s.ID] = s
+}
+
+// AddVolume adds a volume.
+func (f *Fake) AddVolume(v docker.Volume) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.volumes[v.Name] = v
 }
 
 // AddTask adds a Swarm task. Its Status.State is "running" and its
@@ -402,6 +411,8 @@ func (f *Fake) serve(w http.ResponseWriter, r *http.Request) {
 		f.inspectService(w, parts[1])
 	case len(parts) == 2 && parts[0] == "tasks" && r.Method == http.MethodGet:
 		f.inspectTask(w, parts[1])
+	case len(parts) == 2 && parts[0] == "volumes" && r.Method == http.MethodGet:
+		f.inspectVolume(w, parts[1])
 	case len(parts) == 3 && parts[0] == "exec" && parts[2] == "start" && r.Method == http.MethodPost:
 		f.startExec(w, r, parts[1])
 	default:
@@ -599,6 +610,17 @@ func (f *Fake) inspectTask(w http.ResponseWriter, id string) {
 		}
 	}
 	apiError(w, http.StatusNotFound, "task "+id+" not found")
+}
+
+func (f *Fake) inspectVolume(w http.ResponseWriter, name string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	v, ok := f.volumes[name]
+	if !ok {
+		apiError(w, http.StatusNotFound, "get "+name+": no such volume")
+		return
+	}
+	writeJSON(w, http.StatusOK, v)
 }
 
 func (f *Fake) listTasks(w http.ResponseWriter, r *http.Request) {
