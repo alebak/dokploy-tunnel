@@ -74,6 +74,17 @@ type Bridge interface {
 	Open(ctx context.Context, target Target) (io.ReadWriteCloser, error)
 }
 
+// PortLister is implemented by a Bridge that can tell which ports a target
+// exposes. A Bridge without it answers every ports request with an empty
+// list: the ports are unknown, and the client asks the user for one.
+type PortLister interface {
+	// ExposedPorts returns the TCP ports target exposes, sorted by number
+	// and without duplicates; empty when they are unknown. It must only
+	// inspect: no stream is opened and nothing is created. Errors are
+	// reported like those of Bridge.Open.
+	ExposedPorts(ctx context.Context, target Target) ([]tunnel.Port, error)
+}
+
 // UnavailableBridge is a Bridge that opens nothing, for a companion that
 // cannot forward yet.
 type UnavailableBridge struct{}
@@ -110,6 +121,7 @@ func NewServer(auth *Authorizer, bridge Bridge, log *slog.Logger, limits Limits)
 	s := &Server{auth: auth, bridge: bridge, log: log, mux: http.NewServeMux(), limits: limits,
 		perKey: map[[sha256.Size]byte]int{}, drain: make(chan struct{})}
 	s.mux.HandleFunc(tunnel.Path, s.handleTunnel)
+	s.mux.HandleFunc(tunnel.PortsPath, s.handlePorts)
 	s.mux.HandleFunc(tunnel.HealthPath, s.handleHealth)
 	return s
 }
@@ -261,12 +273,9 @@ func (s *Server) open(r *http.Request) (Target, io.ReadWriteCloser, *rejection) 
 	if err != nil {
 		return Target{Target: requested}, nil, reject(http.StatusBadRequest, tunnel.CodeInvalidArgument, err.Error())
 	}
-	key := r.Header.Get(tunnel.HeaderAPIKey)
-	switch {
-	case key == "":
-		return Target{Target: requested}, nil, reject(http.StatusUnauthorized, tunnel.CodeUnauthenticated, "missing the "+tunnel.HeaderAPIKey+" header")
-	case len(key) > tunnel.MaxAPIKeyBytes:
-		return Target{Target: requested}, nil, reject(http.StatusBadRequest, tunnel.CodeInvalidArgument, "the API key is too long")
+	key, rej := apiKey(r)
+	if rej != nil {
+		return Target{Target: requested}, nil, rej
 	}
 
 	if !s.acquire() {
@@ -278,6 +287,83 @@ func (s *Server) open(r *http.Request) (Target, io.ReadWriteCloser, *rejection) 
 		return Target{Target: requested}, nil, rej
 	}
 	return target, stream, nil
+}
+
+// apiKey returns the well-formed API key of r.
+func apiKey(r *http.Request) (string, *rejection) {
+	key := r.Header.Get(tunnel.HeaderAPIKey)
+	switch {
+	case key == "":
+		return "", reject(http.StatusUnauthorized, tunnel.CodeUnauthenticated, "missing the "+tunnel.HeaderAPIKey+" header")
+	case len(key) > tunnel.MaxAPIKeyBytes:
+		return "", reject(http.StatusBadRequest, tunnel.CodeInvalidArgument, "the API key is too long")
+	}
+	return key, nil
+}
+
+func (s *Server) handlePorts(w http.ResponseWriter, r *http.Request) {
+	log := s.log.With("remote", r.RemoteAddr)
+	ref, ports, rej := s.listPorts(r)
+	if ref.ServiceID != "" {
+		log = log.With("target", ref.Target(0).String())
+	}
+	if rej != nil {
+		log.Info("ports request rejected", "status", rej.status, "code", rej.body.Code, "error", rej.detail)
+		writeJSON(w, rej.status, rej.body)
+		return
+	}
+	log.Info("ports listed", "ports", len(ports))
+	writeJSON(w, http.StatusOK, tunnel.PortsResponse{Ports: ports})
+}
+
+// listPorts validates and authorizes a ports request exactly as a tunnel
+// request, then asks the bridge which ports the target exposes. It never
+// opens a stream nor takes a tunnel slot. The ports are never nil.
+func (s *Server) listPorts(r *http.Request) (tunnel.TargetRef, []tunnel.Port, *rejection) {
+	switch {
+	case r.Method != http.MethodGet:
+		return tunnel.TargetRef{}, nil, reject(http.StatusMethodNotAllowed, tunnel.CodeMethodNotAllowed, "use GET")
+	case !sameOrigin(r):
+		return tunnel.TargetRef{}, nil, reject(http.StatusForbidden, tunnel.CodeForbiddenOrigin, "cross-origin requests are not allowed")
+	}
+	ref, err := tunnel.ParseTargetRef(r.URL.Query())
+	if err != nil {
+		return tunnel.TargetRef{}, nil, reject(http.StatusBadRequest, tunnel.CodeInvalidArgument, err.Error())
+	}
+	key, rej := apiKey(r)
+	if rej != nil {
+		return ref, nil, rej
+	}
+	if s.isDraining() {
+		return ref, nil, reject(http.StatusServiceUnavailable, tunnel.CodeUnavailable, "the companion is shutting down")
+	}
+
+	authCtx, cancel := context.WithTimeout(r.Context(), authorizeTimeout)
+	defer cancel()
+	target, err := s.auth.Authorize(authCtx, key, ref.Target(0), ref.ServerID)
+	if err != nil {
+		return ref, nil, authRejection(err)
+	}
+
+	ports := []tunnel.Port{}
+	lister, ok := s.bridge.(PortLister)
+	if !ok {
+		return ref, ports, nil
+	}
+	listCtx, cancel := context.WithTimeout(r.Context(), openTimeout)
+	defer cancel()
+	exposed, err := lister.ExposedPorts(listCtx, target)
+	if err != nil {
+		var rej *rejection
+		if errors.Is(err, context.DeadlineExceeded) {
+			rej = reject(http.StatusGatewayTimeout, tunnel.CodeTimeout, "the target did not answer in time")
+		} else {
+			rej = reject(http.StatusBadGateway, tunnel.CodeTargetUnreachable, "the target could not be reached")
+		}
+		rej.detail = err
+		return ref, nil, rej
+	}
+	return ref, append(ports, exposed...), nil
 }
 
 func (s *Server) authorizeAndOpen(ctx context.Context, key string, requested tunnel.Target, wantServer string) (Target, io.ReadWriteCloser, *rejection) {

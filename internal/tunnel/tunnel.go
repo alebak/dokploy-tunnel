@@ -20,6 +20,8 @@ const (
 	Path = "/v1/tunnel"
 	// HealthPath is the companion's liveness endpoint.
 	HealthPath = "/healthz"
+	// PortsPath is the endpoint that lists the ports a target exposes.
+	PortsPath = "/v1/ports"
 	// HeaderAPIKey carries the caller's Dokploy API key.
 	HeaderAPIKey = "x-api-key"
 	// MaxAPIKeyBytes bounds the length of an API key.
@@ -104,15 +106,31 @@ func (t Target) String() string {
 // ParseTarget reads the target of a tunnel request from its query
 // parameters. It fails with ErrInvalidTarget.
 func ParseTarget(q url.Values) (Target, error) {
+	t, err := parseService(q)
+	if err != nil {
+		return Target{}, err
+	}
+	rawPort, err := single(q, ParamPort)
+	if err != nil {
+		return Target{}, err
+	}
+
+	// Atoi alone would accept a sign, as in "+5432".
+	port, err := strconv.Atoi(rawPort)
+	if err != nil || rawPort[0] < '0' || rawPort[0] > '9' || port < 1 || port > 65535 {
+		return Target{}, fmt.Errorf("%w: %s must be a number from 1 to 65535", ErrInvalidTarget, ParamPort)
+	}
+	t.Port = port
+	return t, nil
+}
+
+// parseService reads the service a request names, without a port.
+func parseService(q url.Values) (Target, error) {
 	typ, err := single(q, ParamServiceType)
 	if err != nil {
 		return Target{}, err
 	}
 	id, err := single(q, ParamServiceID)
-	if err != nil {
-		return Target{}, err
-	}
-	rawPort, err := single(q, ParamPort)
 	if err != nil {
 		return Target{}, err
 	}
@@ -133,14 +151,73 @@ func ParseTarget(q url.Values) (Target, error) {
 	if !dokployID.MatchString(t.ServiceID) {
 		return Target{}, fmt.Errorf("%w: malformed %s", ErrInvalidTarget, ParamServiceID)
 	}
-
-	// Atoi alone would accept a sign, as in "+5432".
-	port, err := strconv.Atoi(rawPort)
-	if err != nil || rawPort[0] < '0' || rawPort[0] > '9' || port < 1 || port > 65535 {
-		return Target{}, fmt.Errorf("%w: %s must be a number from 1 to 65535", ErrInvalidTarget, ParamPort)
-	}
-	t.Port = port
 	return t, nil
+}
+
+// TargetRef names a service without a port, as a ports request does: a
+// Dokploy service, or a service inside a compose stack, and optionally the
+// Dokploy server the client expects it on.
+type TargetRef struct {
+	// ServiceType is the type of the Dokploy service. It is
+	// dokploy.ServiceCompose for a service inside a compose stack.
+	ServiceType dokploy.ServiceType
+	// ServiceID is the Dokploy ID of the service, or of the compose stack.
+	ServiceID string
+	// ComposeService is the name of the service in the compose file, for a
+	// service inside a compose stack, and empty otherwise.
+	ComposeService string
+	// ServerID is the Dokploy server the client expects the service on: a
+	// server ID, LocalServer, or empty for no expectation.
+	ServerID string
+}
+
+// Target returns the target at port of the service r names.
+func (r TargetRef) Target(port int) Target {
+	return Target{ServiceType: r.ServiceType, ServiceID: r.ServiceID, ComposeService: r.ComposeService, Port: port}
+}
+
+// Query returns the query parameters that address r.
+func (r TargetRef) Query() url.Values {
+	t := r.Target(0)
+	q := url.Values{
+		ParamServiceType: {t.wireType()},
+		ParamServiceID:   {t.wireID()},
+	}
+	if r.ServerID != "" {
+		q.Set(ParamServerID, r.ServerID)
+	}
+	return q
+}
+
+// ParseTargetRef reads the service and optional server of a ports request
+// from its query parameters; a port parameter is ignored. It fails with
+// ErrInvalidTarget.
+func ParseTargetRef(q url.Values) (TargetRef, error) {
+	t, err := parseService(q)
+	if err != nil {
+		return TargetRef{}, err
+	}
+	server, err := ParseServerID(q)
+	if err != nil {
+		return TargetRef{}, err
+	}
+	return TargetRef{ServiceType: t.ServiceType, ServiceID: t.ServiceID, ComposeService: t.ComposeService, ServerID: server}, nil
+}
+
+// ProtocolTCP is the protocol of every port a ports response lists.
+const ProtocolTCP = "tcp"
+
+// PortsResponse is the JSON body of a successful ports request.
+type PortsResponse struct {
+	// Ports are the TCP ports the target exposes, sorted by number. The
+	// list is empty, never null, when they are unknown.
+	Ports []Port `json:"ports"`
+}
+
+// Port is a port a target exposes.
+type Port struct {
+	Port     int    `json:"port"`
+	Protocol string `json:"protocol"`
 }
 
 // ValidID reports whether id has the form of a Dokploy ID, such as a
