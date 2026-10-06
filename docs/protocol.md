@@ -92,11 +92,20 @@ one of its services with `compose_service` instead.
 3. The service runs on this companion's Dokploy server (the `serverId` of the
    `.one` response; empty means the Dokploy server itself), and matches the
    optional `serverId` parameter.
-4. The stream to the target is opened: through a repeater container on the
-   target's own Docker network, which connects to the port. The companion
-   waits until the connection to the target is established, so a target
-   that refuses it is reported as `target_unreachable` before the upgrade.
-5. The connection is upgraded.
+4. The tunnel fits the companion's limits: by default 64 tunnels open at
+   once per API key and 512 in all. Only authorized requests take a slot,
+   and the slot is freed when the tunnel ends.
+5. The stream to the target is opened: through a repeater container on the
+   target's own Docker network, which connects to the target's IP address
+   there, as Docker reports it. The target is found only from sources tied
+   to the service Dokploy authorized: the Swarm service of that exact name
+   and its running tasks, or, for a `docker-compose` stack, the containers
+   Compose labelled with the stack's appName and service, deployed from
+   Dokploy's directory for that appName and carrying no Swarm labels. The
+   companion waits until the connection to the target is established, so a
+   target that refuses it is reported as `target_unreachable` before the
+   upgrade.
+6. The connection is upgraded.
 
 ### Error responses (before the upgrade)
 
@@ -118,11 +127,20 @@ a body of this shape:
 | 409 | `network_not_attachable` | The target's network cannot be joined to reach it; enable "attachable" on that network in Dokploy |
 | 421 | `wrong_server` | The target runs on another Dokploy server; the body names it in `expected_server_id` (see below) |
 | 426 | `upgrade_required` | A `GET` without a WebSocket upgrade |
+| 429 | `too_many_tunnels` | The API key, or the companion as a whole, has as many tunnels open as allowed; close some and retry |
 | 502 | `unreachable` | The Dokploy API could not be reached, or did not answer like Dokploy |
-| 502 | `target_unreachable` | The stream to the target could not be opened |
+| 502 | `target_unreachable` | The stream to the target could not be opened: nothing runs for it, its containers are ambiguous, the connection was refused, or the companion refuses the target (see below) |
 | 503 | `unavailable` | The companion is shutting down |
 | 504 | `timeout` | Dokploy or the target did not answer in time |
 | 500 | `internal` | Unexpected failure |
+
+The companion refuses some targets with `target_unreachable` whatever the
+caller may read: services whose appName is `dokploy` or starts with
+`dokploy-`, which Dokploy's own panel, database, cache and proxy use (and
+which Dokploy lets users pick for their own services too), and containers
+that run privileged, on the host's network, or with the Docker socket
+mounted. Such containers are host infrastructure; a tunnel to them would
+give whoever can read the service control of the host.
 
 `wrong_server` is only returned to a caller that can read the service, and
 carries the server the target belongs to, `local` for the Dokploy server

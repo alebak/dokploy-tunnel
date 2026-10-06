@@ -41,6 +41,15 @@ type Container struct {
 	// Networks maps network names to the container's aliases on them. The
 	// networks must have been added first.
 	Networks map[string][]string
+	// IPs maps network names to the container's address there; addresses
+	// are assigned for the networks it leaves out.
+	IPs map[string]string
+	// Privileged, NetworkMode, Binds and Mounts are reported in the
+	// container's inspection.
+	Privileged  bool
+	NetworkMode string
+	Binds       []string
+	Mounts      []docker.Mount
 }
 
 // ExecConfig is an exec the fake daemon was asked to create.
@@ -70,11 +79,17 @@ type Fake struct {
 	// CreateError, when set, fails every container creation with this
 	// status and message.
 	CreateError *docker.APIError
+	// Intercept, when set, sees every request first; it returns true when
+	// it answered the request itself.
+	Intercept func(w http.ResponseWriter, r *http.Request) bool
 
 	mu         sync.Mutex
 	containers map[string]*docker.Container
 	networks   map[string]docker.Network
 	services   map[string]docker.Service
+	tasks      []docker.Task
+	nextIP     int
+	volumeRMs  int
 	images     map[string]bool
 	execs      map[string]ExecConfig
 	created    []docker.ContainerConfig
@@ -127,13 +142,21 @@ func (f *Fake) AddContainer(c Container) {
 			dc.Config.ExposedPorts[p] = struct{}{}
 		}
 	}
+	dc.HostConfig.Privileged = c.Privileged
+	dc.HostConfig.NetworkMode = c.NetworkMode
+	dc.HostConfig.Binds = c.Binds
+	dc.Mounts = c.Mounts
 	dc.NetworkSettings.Networks = map[string]docker.EndpointSettings{}
 	for name, aliases := range c.Networks {
 		n, ok := f.network(name)
 		if !ok {
 			f.t.Fatalf("dockertest: container %s joins unknown network %s", c.ID, name)
 		}
-		dc.NetworkSettings.Networks[n.Name] = docker.EndpointSettings{NetworkID: n.ID, Aliases: aliases, DNSNames: append([]string{c.Name}, aliases...)}
+		ip, ok := c.IPs[name]
+		if !ok {
+			ip = f.assignIP()
+		}
+		dc.NetworkSettings.Networks[n.Name] = docker.EndpointSettings{NetworkID: n.ID, IPAddress: ip, Aliases: aliases, DNSNames: append([]string{c.Name}, aliases...)}
 	}
 	f.containers[c.ID] = dc
 }
@@ -150,6 +173,34 @@ func (f *Fake) AddService(s docker.Service) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.services[s.ID] = s
+}
+
+// AddTask adds a Swarm task. Its Status.State is "running" and its
+// DesiredState "running" unless set.
+func (f *Fake) AddTask(task docker.Task) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if task.DesiredState == "" {
+		task.DesiredState = "running"
+	}
+	if task.Status.State == "" {
+		task.Status.State = "running"
+	}
+	f.tasks = append(f.tasks, task)
+}
+
+// assignIP returns a fresh address; f.mu must be held.
+func (f *Fake) assignIP() string {
+	f.nextIP++
+	return fmt.Sprintf("10.99.%d.%d", f.nextIP/250, f.nextIP%250+1)
+}
+
+// VolumeRemovals returns how many container removals asked to remove
+// volumes too.
+func (f *Fake) VolumeRemovals() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.volumeRMs
 }
 
 // AddImage makes an image present, as if pulled.
@@ -261,6 +312,9 @@ var versioned = regexp.MustCompile(`^/v([0-9]+\.[0-9]+)(/.*)$`)
 
 func (f *Fake) serve(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("API-Version", f.APIVersion)
+	if f.Intercept != nil && f.Intercept(w, r) {
+		return
+	}
 	path := r.URL.Path
 	if m := versioned.FindStringSubmatch(path); m != nil {
 		f.mu.Lock()
@@ -276,6 +330,8 @@ func (f *Fake) serve(w http.ResponseWriter, r *http.Request) {
 		_, _ = io.WriteString(w, "OK")
 	case r.Method == http.MethodGet && path == "/containers/json":
 		f.listContainers(w, r)
+	case r.Method == http.MethodGet && path == "/tasks":
+		f.listTasks(w, r)
 	case r.Method == http.MethodPost && path == "/containers/create":
 		f.createContainer(w, r)
 	case r.Method == http.MethodPost && path == "/images/create":
@@ -287,7 +343,7 @@ func (f *Fake) serve(w http.ResponseWriter, r *http.Request) {
 	case len(parts) == 3 && parts[0] == "containers" && parts[2] == "exec" && r.Method == http.MethodPost:
 		f.createExec(w, r, parts[1])
 	case len(parts) == 2 && parts[0] == "containers" && r.Method == http.MethodDelete:
-		f.removeContainer(w, parts[1])
+		f.removeContainer(w, r, parts[1])
 	case len(parts) == 2 && parts[0] == "networks" && r.Method == http.MethodGet:
 		f.inspectNetwork(w, parts[1])
 	case len(parts) == 2 && parts[0] == "services" && r.Method == http.MethodGet:
@@ -395,7 +451,7 @@ func (f *Fake) createContainer(w http.ResponseWriter, r *http.Request) {
 			apiError(w, http.StatusForbidden, "Could not attach to network "+mode+": network not manually attachable")
 			return
 		}
-		c.NetworkSettings.Networks[n.Name] = docker.EndpointSettings{NetworkID: n.ID}
+		c.NetworkSettings.Networks[n.Name] = docker.EndpointSettings{NetworkID: n.ID, IPAddress: f.assignIP()}
 	}
 	f.containers[c.ID] = c
 	f.created = append(f.created, cfg)
@@ -415,9 +471,12 @@ func (f *Fake) startContainer(w http.ResponseWriter, id string) {
 	w.WriteHeader(http.StatusNoContent)
 }
 
-func (f *Fake) removeContainer(w http.ResponseWriter, id string) {
+func (f *Fake) removeContainer(w http.ResponseWriter, r *http.Request, id string) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	if v := r.URL.Query().Get("v"); v == "1" || v == "true" {
+		f.volumeRMs++
+	}
 	c, ok := f.container(id)
 	if !ok {
 		apiError(w, http.StatusNotFound, "No such container: "+id)
@@ -473,6 +532,42 @@ func (f *Fake) inspectService(w http.ResponseWriter, id string) {
 		}
 	}
 	apiError(w, http.StatusNotFound, "service "+id+" not found")
+}
+
+func (f *Fake) listTasks(w http.ResponseWriter, r *http.Request) {
+	var filters struct {
+		Service      []string `json:"service"`
+		DesiredState []string `json:"desired-state"`
+	}
+	if raw := r.URL.Query().Get("filters"); raw != "" {
+		if err := json.Unmarshal([]byte(raw), &filters); err != nil {
+			apiError(w, http.StatusBadRequest, "invalid filters: "+err.Error())
+			return
+		}
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	out := []docker.Task{}
+	for _, task := range f.tasks {
+		if len(filters.Service) > 0 && !slices.ContainsFunc(filters.Service, func(s string) bool { return f.isService(s, task.ServiceID) }) {
+			continue
+		}
+		if len(filters.DesiredState) > 0 && !slices.Contains(filters.DesiredState, task.DesiredState) {
+			continue
+		}
+		out = append(out, task)
+	}
+	writeJSON(w, http.StatusOK, out)
+}
+
+// isService reports whether ref, an ID or name, names service id; f.mu
+// must be held.
+func (f *Fake) isService(ref, id string) bool {
+	if ref == id {
+		return true
+	}
+	s, ok := f.services[id]
+	return ok && s.Spec.Name == ref
 }
 
 func (f *Fake) createExec(w http.ResponseWriter, r *http.Request, id string) {

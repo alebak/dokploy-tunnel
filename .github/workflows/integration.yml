@@ -1,0 +1,72 @@
+name: integration
+
+# Runs the repeater against a real Docker daemon on a disposable GitHub
+# runner. These tests create and remove containers, so they are behind the
+# `integration` build tag and never run with `go test ./...`.
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: integration-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  REPEATER_IMAGE: alpine/socat:1.8.1.1@sha256:7f9a06753033f2b7de18edc2353f2c15153413d95a039163c6db270fc7a6c3b0
+
+jobs:
+  docker:
+    name: docker integration
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+
+      - name: Docker version
+        run: docker version
+
+      - name: Deploy a docker compose target
+        run: docker compose -p doktunnel-it -f internal/repeater/testdata/compose.integration.yml up -d --wait
+
+      - name: Deploy Swarm targets
+        run: |
+          docker swarm init --advertise-addr 127.0.0.1
+          docker network create --driver overlay --attachable dt-it-overlay
+          docker network create --driver overlay dt-it-closed
+          docker service create --quiet --name doktunnel-it-web --network dt-it-overlay \
+            "$REPEATER_IMAGE" TCP-LISTEN:7000,fork,reuseaddr EXEC:cat
+          docker service create --quiet --name doktunnel-it-closed --network dt-it-closed \
+            "$REPEATER_IMAGE" TCP-LISTEN:7000,fork,reuseaddr EXEC:cat
+          docker service ls
+
+      - name: Integration tests
+        env:
+          DOKTUNNEL_INTEGRATION: "1"
+        run: go test -tags integration -count=1 -race -v -run '^TestIntegration_' ./internal/repeater/
+
+      - name: No repeater left behind
+        run: |
+          left="$(docker ps -aq --filter label=dev.doktunnel.repeater=1)"
+          if [ -n "$left" ]; then
+            docker ps -a --filter label=dev.doktunnel.repeater=1
+            exit 1
+          fi
+
+      - name: Diagnostics
+        if: ${{ failure() }}
+        run: |
+          docker ps -a
+          docker network ls
+          docker service ps doktunnel-it-web doktunnel-it-closed --no-trunc || true
+          docker compose -p doktunnel-it logs || true

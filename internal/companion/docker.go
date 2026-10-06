@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"net/netip"
+	"net/url"
 
 	"github.com/alebak/dokploy-tunnel/internal/docker"
 	"github.com/alebak/dokploy-tunnel/internal/dokploy"
@@ -33,6 +35,8 @@ func (b *DockerBridge) Open(ctx context.Context, target Target) (io.ReadWriteClo
 		return stream, nil
 	case errors.Is(err, repeater.ErrNetworkNotAttachable):
 		return nil, fmt.Errorf("%w: %v", ErrNetworkNotAttachable, err)
+	case errors.Is(err, repeater.ErrTooManyRepeaters):
+		return nil, fmt.Errorf("%w: %v", ErrTooManyTunnels, err)
 	case errors.Is(err, context.DeadlineExceeded), errors.Is(err, context.Canceled):
 		return nil, err
 	default:
@@ -55,6 +59,20 @@ func (b *DockerBridge) Run(ctx context.Context) {
 // Close removes every repeater the bridge runs.
 func (b *DockerBridge) Close(ctx context.Context) error {
 	return b.repeater.Close(ctx)
+}
+
+// exposedDockerHost reports whether host is a tcp:// endpoint that is not
+// on the loopback interface.
+func exposedDockerHost(host string) bool {
+	u, err := url.Parse(host)
+	if err != nil || u.Scheme != "tcp" {
+		return false
+	}
+	if u.Hostname() == "localhost" {
+		return false
+	}
+	addr, err := netip.ParseAddr(u.Hostname())
+	return err != nil || !addr.IsLoopback()
 }
 
 // repeaterTarget describes target the way Dokploy deployed it.
@@ -81,14 +99,19 @@ func NewBridge(ctx context.Context, cfg Config, log *slog.Logger) (Bridge, func(
 	if err != nil {
 		return nil, nil, err
 	}
+	if exposedDockerHost(cfg.DockerHost) {
+		log.Warn("the Docker API is reached over plain TCP on a non-loopback address: whoever can reach it controls the host; keep it on a private network only the companion joins",
+			"docker_host", cfg.DockerHost)
+	}
 	if err := client.Ping(ctx); err != nil {
 		return nil, nil, fmt.Errorf("reaching Docker at %s: %w", cfg.DockerHost, err)
 	}
 	b := NewDockerBridge(client, repeater.Options{
-		Image: cfg.RepeaterImage,
-		Grace: cfg.RepeaterGrace,
-		TTL:   cfg.ReaperTTL,
-		Log:   log.With("component", "repeater"),
+		Image:        cfg.RepeaterImage,
+		Grace:        cfg.RepeaterGrace,
+		TTL:          cfg.ReaperTTL,
+		MaxRepeaters: cfg.MaxRepeaters,
+		Log:          log.With("component", "repeater"),
 	})
 	log.Info("forwarding through Docker", "docker_host", cfg.DockerHost, "docker_api", client.APIVersion(),
 		"repeater_image", cfg.RepeaterImage)

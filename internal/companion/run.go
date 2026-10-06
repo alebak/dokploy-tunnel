@@ -35,7 +35,7 @@ func Run(ctx context.Context, cfg Config, bridge Bridge, log *slog.Logger) error
 // seconds for them to end.
 func Serve(ctx context.Context, ln net.Listener, cfg Config, bridge Bridge, log *slog.Logger) error {
 	auth := NewAuthorizer(dokploy.New(cfg.DokployURL, ""), cfg.ServerID)
-	srv := NewServer(auth, bridge, log)
+	srv := NewServer(auth, bridge, log, Limits{PerKey: cfg.MaxTunnelsPerKey, Total: cfg.MaxTunnels})
 	httpSrv := &http.Server{
 		Handler:           srv,
 		ReadHeaderTimeout: 10 * time.Second,

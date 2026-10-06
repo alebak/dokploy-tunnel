@@ -1,7 +1,9 @@
 package companion
 
 import (
+	"cmp"
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -32,7 +34,28 @@ const (
 	chunkBytes = 32 << 10
 )
 
+// Defaults of Limits.
+const (
+	DefaultMaxTunnelsPerKey = 64
+	DefaultMaxTunnels       = 512
+)
+
+// codeTooManyTunnels refuses a tunnel over a cap of Limits, with HTTP 429.
+const codeTooManyTunnels tunnel.Code = "too_many_tunnels"
+
+// Limits cap the tunnels open at once. Zero values take the defaults.
+type Limits struct {
+	// PerKey caps the tunnels of one API key; DefaultMaxTunnelsPerKey by
+	// default.
+	PerKey int
+	// Total caps the tunnels of the companion; DefaultMaxTunnels by
+	// default.
+	Total int
+}
+
 var (
+	// ErrTooManyTunnels means a Bridge cannot open more streams now.
+	ErrTooManyTunnels = errors.New("too many tunnels are open")
 	// ErrNetworkNotAttachable means a Bridge cannot join the network the
 	// target is reachable on.
 	ErrNetworkNotAttachable = errors.New("the target's network is not attachable")
@@ -66,18 +89,26 @@ type Server struct {
 	bridge Bridge
 	log    *slog.Logger
 	mux    *http.ServeMux
+	limits Limits
 
 	mu       sync.Mutex
 	draining bool
+	// perKey counts the tunnels of each key, by its SHA-256 so that keys are
+	// not kept; total is their sum.
+	perKey map[[sha256.Size]byte]int
+	total  int
 	// drain is closed when draining starts, to close every stream.
 	drain   chan struct{}
 	streams sync.WaitGroup
 }
 
-// NewServer returns a Server that authorizes tunnels with auth and opens
-// them with bridge.
-func NewServer(auth *Authorizer, bridge Bridge, log *slog.Logger) *Server {
-	s := &Server{auth: auth, bridge: bridge, log: log, mux: http.NewServeMux(), drain: make(chan struct{})}
+// NewServer returns a Server that authorizes tunnels with auth, opens
+// them with bridge, and keeps them within limits.
+func NewServer(auth *Authorizer, bridge Bridge, log *slog.Logger, limits Limits) *Server {
+	limits.PerKey = cmp.Or(limits.PerKey, DefaultMaxTunnelsPerKey)
+	limits.Total = cmp.Or(limits.Total, DefaultMaxTunnels)
+	s := &Server{auth: auth, bridge: bridge, log: log, mux: http.NewServeMux(), limits: limits,
+		perKey: map[[sha256.Size]byte]int{}, drain: make(chan struct{})}
 	s.mux.HandleFunc(tunnel.Path, s.handleTunnel)
 	s.mux.HandleFunc(tunnel.HealthPath, s.handleHealth)
 	return s
@@ -121,6 +152,41 @@ func (s *Server) acquire() bool {
 	}
 	s.streams.Add(1)
 	return true
+}
+
+// reserve takes a tunnel slot for key, within the limits, and returns the
+// func that frees it. It reports false over a cap.
+func (s *Server) reserve(key string) (func(), bool) {
+	id := sha256.Sum256([]byte(key))
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.total >= s.limits.Total || s.perKey[id] >= s.limits.PerKey {
+		return nil, false
+	}
+	s.perKey[id]++
+	s.total++
+	var once sync.Once
+	return func() {
+		once.Do(func() {
+			s.mu.Lock()
+			defer s.mu.Unlock()
+			s.total--
+			if s.perKey[id]--; s.perKey[id] == 0 {
+				delete(s.perKey, id)
+			}
+		})
+	}, true
+}
+
+// slotStream frees its tunnel slot when closed.
+type slotStream struct {
+	io.ReadWriteCloser
+	free func()
+}
+
+func (s slotStream) Close() error {
+	defer s.free()
+	return s.ReadWriteCloser.Close()
 }
 
 func (s *Server) isDraining() bool {
@@ -222,12 +288,21 @@ func (s *Server) authorizeAndOpen(ctx context.Context, key string, requested tun
 		return Target{}, nil, authRejection(err)
 	}
 
+	// Slots are only taken for authorized keys, so that unauthenticated
+	// requests cannot fill them, and before the bridge does any work.
+	free, ok := s.reserve(key)
+	if !ok {
+		return Target{}, nil, reject(http.StatusTooManyRequests, codeTooManyTunnels, "too many tunnels are open; close some and retry")
+	}
 	openCtx, cancel := context.WithTimeout(ctx, openTimeout)
 	defer cancel()
 	stream, err := s.bridge.Open(openCtx, target)
 	if err != nil {
+		free()
 		var rej *rejection
 		switch {
+		case errors.Is(err, ErrTooManyTunnels):
+			rej = reject(http.StatusTooManyRequests, codeTooManyTunnels, "too many tunnels are open; close some and retry")
 		case errors.Is(err, ErrNetworkNotAttachable):
 			rej = reject(http.StatusConflict, tunnel.CodeNetworkNotAttachable,
 				"the service's network cannot be attached; enable \"attachable\" on it in Dokploy")
@@ -239,7 +314,7 @@ func (s *Server) authorizeAndOpen(ctx context.Context, key string, requested tun
 		rej.detail = err
 		return Target{}, nil, rej
 	}
-	return target, stream, nil
+	return target, slotStream{ReadWriteCloser: stream, free: free}, nil
 }
 
 // authRejection maps an Authorize error to its response.

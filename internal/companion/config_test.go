@@ -97,6 +97,9 @@ func TestParseConfig_Invalid(t *testing.T) {
 		{"zero grace", []string{"--dokploy-url", "http://dokploy:3000", "--repeater-grace", "0s"}, nil},
 		{"negative TTL", []string{"--dokploy-url", "http://dokploy:3000"}, map[string]string{EnvReaperTTL: "-1m"}},
 		{"malformed duration", []string{"--dokploy-url", "http://dokploy:3000"}, map[string]string{EnvRepeaterGrace: "soon"}},
+		{"zero tunnels", []string{"--dokploy-url", "http://dokploy:3000", "--max-tunnels", "0"}, nil},
+		{"negative tunnels per key", []string{"--dokploy-url", "http://dokploy:3000"}, map[string]string{EnvMaxPerKey: "-1"}},
+		{"malformed repeater cap", []string{"--dokploy-url", "http://dokploy:3000", "--max-repeaters", "many"}, nil},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -125,7 +128,8 @@ func TestParseConfig_Docker(t *testing.T) {
 			nil,
 			nil,
 			Config{Bridge: BridgeDocker, DockerHost: docker.DefaultHost, RepeaterImage: repeater.DefaultImage,
-				RepeaterGrace: repeater.DefaultGrace, ReaperTTL: repeater.DefaultTTL},
+				RepeaterGrace: repeater.DefaultGrace, ReaperTTL: repeater.DefaultTTL,
+				MaxTunnels: DefaultMaxTunnels, MaxTunnelsPerKey: DefaultMaxTunnelsPerKey, MaxRepeaters: repeater.DefaultMaxRepeaters},
 		},
 		{
 			"environment",
@@ -133,17 +137,20 @@ func TestParseConfig_Docker(t *testing.T) {
 			map[string]string{
 				EnvBridge: "none", EnvDockerHost: "tcp://docker-proxy:2375", EnvRepeaterImage: "registry.example.com/socat:1",
 				EnvRepeaterGrace: "5s", EnvReaperTTL: "10m",
+				EnvMaxTunnels: "100", EnvMaxPerKey: "10", EnvMaxRepeaters: "20",
 			},
 			Config{Bridge: BridgeNone, DockerHost: "tcp://docker-proxy:2375", RepeaterImage: "registry.example.com/socat:1",
-				RepeaterGrace: 5 * time.Second, ReaperTTL: 10 * time.Minute},
+				RepeaterGrace: 5 * time.Second, ReaperTTL: 10 * time.Minute,
+				MaxTunnels: 100, MaxTunnelsPerKey: 10, MaxRepeaters: 20},
 		},
 		{
 			"flags win",
 			[]string{"--bridge", "docker", "--docker-host", "unix:///run/docker.sock", "--repeater-image", "socat:2",
-				"--repeater-grace", "1m", "--reaper-ttl", "2m"},
-			map[string]string{EnvBridge: "none", EnvDockerHost: "tcp://docker-proxy:2375"},
+				"--repeater-grace", "1m", "--reaper-ttl", "2m", "--max-tunnels", "8", "--max-tunnels-per-key", "4", "--max-repeaters", "2"},
+			map[string]string{EnvBridge: "none", EnvDockerHost: "tcp://docker-proxy:2375", EnvMaxTunnels: "100"},
 			Config{Bridge: BridgeDocker, DockerHost: "unix:///run/docker.sock", RepeaterImage: "socat:2",
-				RepeaterGrace: time.Minute, ReaperTTL: 2 * time.Minute},
+				RepeaterGrace: time.Minute, ReaperTTL: 2 * time.Minute,
+				MaxTunnels: 8, MaxTunnelsPerKey: 4, MaxRepeaters: 2},
 		},
 	}
 	for _, tt := range tests {
@@ -157,7 +164,8 @@ func TestParseConfig_Docker(t *testing.T) {
 				t.Fatalf("ParseConfig: %v", err)
 			}
 			if got.Bridge != tt.want.Bridge || got.DockerHost != tt.want.DockerHost || got.RepeaterImage != tt.want.RepeaterImage ||
-				got.RepeaterGrace != tt.want.RepeaterGrace || got.ReaperTTL != tt.want.ReaperTTL {
+				got.RepeaterGrace != tt.want.RepeaterGrace || got.ReaperTTL != tt.want.ReaperTTL ||
+				got.MaxTunnels != tt.want.MaxTunnels || got.MaxTunnelsPerKey != tt.want.MaxTunnelsPerKey || got.MaxRepeaters != tt.want.MaxRepeaters {
 				t.Errorf("ParseConfig = %+v, want %+v", got, tt.want)
 			}
 		})
