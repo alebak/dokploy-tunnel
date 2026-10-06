@@ -3,7 +3,9 @@ set -euo pipefail
 
 # Pinned tool versions. Prebuilt release binaries are downloaded instead of
 # `go install`, which compiles from source and keeps several cores busy for
-# minutes in every new container.
+# minutes in every new container. They go to $(go env GOPATH)/bin, which the
+# image puts on PATH for every user, like `go install` did; ~/.local/bin is
+# only on PATH in interactive shells, so `docker exec` would not find them.
 GORELEASER_VERSION=2.18.2
 ACTIONLINT_VERSION=1.7.12
 
@@ -14,9 +16,12 @@ if ! grep -qF '.local/bin' "$HOME/.bashrc" 2>/dev/null; then
 fi
 export PATH="$HOME/.local/bin:$PATH"
 
+tool_bin="$(go env GOPATH)/bin"
+mkdir -p "$tool_bin"
+
 # install_release <binary> <archive URL> <checksums URL>
 # Downloads a release archive, checks it against the release's checksums file
-# and installs <binary> from it into ~/.local/bin.
+# and installs <binary> from it into $tool_bin.
 install_release() {
   local binary=$1 archive_url=$2 checksums_url=$3
   local tmp archive
@@ -31,7 +36,7 @@ install_release() {
   fi
   (cd "$tmp" && sha256sum --check --strict --quiet expected)
   tar -xzf "$tmp/$archive" -C "$tmp" "$binary"
-  install -m 0755 "$tmp/$binary" "$HOME/.local/bin/$binary"
+  install -m 0755 "$tmp/$binary" "$tool_bin/$binary"
   rm -rf "$tmp"
 }
 
