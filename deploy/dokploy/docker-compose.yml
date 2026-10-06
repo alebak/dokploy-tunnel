@@ -1,0 +1,87 @@
+# doktunnel-companion and its Docker socket proxy, as a Dokploy "Docker
+# Compose" service with a raw compose file.
+#
+# Install guide: docs/install-companion.md. In short:
+#   - Deploy it in an admin-only Dokploy project.
+#   - Leave "Isolated Deployments" and "Randomize Compose" off and add no
+#     domain in the Domains tab: Dokploy then deploys this file unchanged.
+#   - Set these variables in the service's Environment tab (Dokploy writes
+#     them to the .env file next to this one):
+#
+#       DOKTUNNEL_VERSION=0.5.0           # image tag, without the "v"
+#       PANEL_DOMAIN=dokploy.example.com  # the panel's domain, served over HTTPS
+#       DOCKER_GID=988                    # stat -c %g /var/run/docker.sock
+#
+#     and, only on a remote server:
+#
+#       DOKPLOY_URL=https://dokploy.example.com
+#       SERVER_ID=<the remote server's Dokploy ID>
+#
+# The socket proxy holds the Docker socket and serves an unauthenticated API
+# on port 2375. It must only ever join the "internal" network below, which
+# only the companion shares; never add it to dokploy-network or publish its
+# port.
+
+services:
+  socket-proxy:
+    image: ghcr.io/alebak/doktunnel-companion:${DOKTUNNEL_VERSION:?set DOKTUNNEL_VERSION}
+    entrypoint: ["/usr/local/bin/doktunnel-socket-proxy"]
+    restart: unless-stopped
+    # The image runs as nonroot (65532); the socket's group lets it open the
+    # socket without running as root.
+    group_add:
+      - "${DOCKER_GID:?set DOCKER_GID to the GID of /var/run/docker.sock}"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    networks:
+      - internal
+
+  companion:
+    image: ghcr.io/alebak/doktunnel-companion:${DOKTUNNEL_VERSION:?set DOKTUNNEL_VERSION}
+    restart: unless-stopped
+    depends_on:
+      - socket-proxy
+    environment:
+      # Dokploy's API as the companion reaches it: on the Dokploy server
+      # itself, the "dokploy" service on dokploy-network.
+      DOKTUNNEL_COMPANION_DOKPLOY_URL: ${DOKPLOY_URL:-http://dokploy:3000}
+      DOKTUNNEL_COMPANION_SERVER_ID: ${SERVER_ID:-}
+      # The socket proxy, never the socket itself. The companion logs a
+      # warning that this is plain TCP off loopback; the internal network is
+      # what keeps it private.
+      DOCKER_HOST: tcp://socket-proxy:2375
+    volumes:
+      # The image points DOKTUNNEL_COMPANION_REPEATER_KEY_FILE here. The key
+      # proves which repeater containers this companion created, so it must
+      # outlive the container.
+      - repeater-key:/var/lib/doktunnel
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    networks:
+      - internal
+      - dokploy-network
+    labels:
+      - traefik.enable=true
+      # The companion is on two networks; Traefik must use this one.
+      - traefik.docker.network=dokploy-network
+      - traefik.http.routers.doktunnel-companion.rule=Host(`${PANEL_DOMAIN:?set PANEL_DOMAIN}`) && PathPrefix(`/doktunnel`)
+      - traefik.http.routers.doktunnel-companion.entrypoints=websecure
+      - traefik.http.routers.doktunnel-companion.tls.certresolver=letsencrypt
+      - traefik.http.routers.doktunnel-companion.middlewares=doktunnel-companion-strip
+      - traefik.http.routers.doktunnel-companion.service=doktunnel-companion
+      - traefik.http.middlewares.doktunnel-companion-strip.stripprefix.prefixes=/doktunnel
+      - traefik.http.services.doktunnel-companion.loadbalancer.server.port=8080
+
+networks:
+  # No route out and no other members: only the companion reaches the proxy.
+  internal:
+    internal: true
+  dokploy-network:
+    external: true
+
+volumes:
+  repeater-key:
