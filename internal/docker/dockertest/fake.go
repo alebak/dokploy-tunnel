@@ -134,6 +134,9 @@ func (f *Fake) AddContainer(c Container) {
 	dc := &docker.Container{ID: c.ID, Name: "/" + c.Name, Created: c.Created.UTC().Format(time.RFC3339Nano)}
 	dc.State.Running = c.Running
 	dc.State.Status = map[bool]string{true: "running", false: "exited"}[c.Running]
+	if c.Running {
+		dc.State.StartedAt = f.startTime("")
+	}
 	dc.Config.Image = c.Image
 	dc.Config.Labels = c.Labels
 	if len(c.ExposedPorts) > 0 {
@@ -156,7 +159,7 @@ func (f *Fake) AddContainer(c Container) {
 		if !ok {
 			ip = f.assignIP()
 		}
-		dc.NetworkSettings.Networks[n.Name] = docker.EndpointSettings{NetworkID: n.ID, IPAddress: ip, Aliases: aliases, DNSNames: append([]string{c.Name}, aliases...)}
+		dc.NetworkSettings.Networks[n.Name] = docker.EndpointSettings{NetworkID: n.ID, EndpointID: randomID(), IPAddress: ip, Aliases: aliases, DNSNames: append([]string{c.Name}, aliases...)}
 	}
 	f.containers[c.ID] = dc
 }
@@ -231,6 +234,55 @@ func (f *Fake) ContainerIDs() []string {
 	}
 	slices.Sort(ids)
 	return ids
+}
+
+// startTime returns a start time later than prev, an RFC 3339 time or "",
+// so that every start of a container is told apart even on coarse clocks.
+func (f *Fake) startTime(prev string) string {
+	now := time.Now().UTC()
+	if p, err := time.Parse(time.RFC3339Nano, prev); err == nil && !now.After(p) {
+		now = p.Add(time.Microsecond)
+	}
+	return now.Format(time.RFC3339Nano)
+}
+
+// RestartContainer stops and starts a container again, as the daemon does
+// on a restart: it gets a new start time and new network endpoints, and
+// keeps its addresses.
+func (f *Fake) RestartContainer(id string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	c, ok := f.containers[id]
+	if !ok {
+		return
+	}
+	c.State.Running = true
+	c.State.Status = "running"
+	c.State.StartedAt = f.startTime(c.State.StartedAt)
+	for name, ep := range c.NetworkSettings.Networks {
+		ep.EndpointID = randomID()
+		c.NetworkSettings.Networks[name] = ep
+	}
+}
+
+// DeleteContainer removes a container, as if something other than the
+// code under test had removed it.
+func (f *Fake) DeleteContainer(id string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	delete(f.containers, id)
+}
+
+// SetTaskState sets the Status.State of a Swarm task, such as "shutdown"
+// once it has ended.
+func (f *Fake) SetTaskState(id, state string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	for i := range f.tasks {
+		if f.tasks[i].ID == id {
+			f.tasks[i].Status.State = state
+		}
+	}
 }
 
 // StopContainer marks a container as exited, as if it had died.
@@ -348,6 +400,8 @@ func (f *Fake) serve(w http.ResponseWriter, r *http.Request) {
 		f.inspectNetwork(w, parts[1])
 	case len(parts) == 2 && parts[0] == "services" && r.Method == http.MethodGet:
 		f.inspectService(w, parts[1])
+	case len(parts) == 2 && parts[0] == "tasks" && r.Method == http.MethodGet:
+		f.inspectTask(w, parts[1])
 	case len(parts) == 3 && parts[0] == "exec" && parts[2] == "start" && r.Method == http.MethodPost:
 		f.startExec(w, r, parts[1])
 	default:
@@ -451,7 +505,7 @@ func (f *Fake) createContainer(w http.ResponseWriter, r *http.Request) {
 			apiError(w, http.StatusForbidden, "Could not attach to network "+mode+": network not manually attachable")
 			return
 		}
-		c.NetworkSettings.Networks[n.Name] = docker.EndpointSettings{NetworkID: n.ID, IPAddress: f.assignIP()}
+		c.NetworkSettings.Networks[n.Name] = docker.EndpointSettings{NetworkID: n.ID, EndpointID: randomID(), IPAddress: f.assignIP()}
 	}
 	f.containers[c.ID] = c
 	f.created = append(f.created, cfg)
@@ -468,6 +522,7 @@ func (f *Fake) startContainer(w http.ResponseWriter, id string) {
 	}
 	c.State.Running = true
 	c.State.Status = "running"
+	c.State.StartedAt = f.startTime(c.State.StartedAt)
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -532,6 +587,18 @@ func (f *Fake) inspectService(w http.ResponseWriter, id string) {
 		}
 	}
 	apiError(w, http.StatusNotFound, "service "+id+" not found")
+}
+
+func (f *Fake) inspectTask(w http.ResponseWriter, id string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	for _, task := range f.tasks {
+		if task.ID == id {
+			writeJSON(w, http.StatusOK, task)
+			return
+		}
+	}
+	apiError(w, http.StatusNotFound, "task "+id+" not found")
 }
 
 func (f *Fake) listTasks(w http.ResponseWriter, r *http.Request) {

@@ -31,6 +31,9 @@ type Container struct {
 	State   struct {
 		Running bool   `json:"Running"`
 		Status  string `json:"Status"`
+		// StartedAt is when the container last started; every start sets
+		// it anew.
+		StartedAt string `json:"StartedAt"`
 	} `json:"State"`
 	Config struct {
 		Image  string            `json:"Image"`
@@ -75,6 +78,9 @@ type DeviceMapping struct {
 // EndpointSettings is a container's attachment to one network.
 type EndpointSettings struct {
 	NetworkID string `json:"NetworkID"`
+	// EndpointID identifies this attachment; connecting the container to
+	// the network again, or restarting it, creates a new one.
+	EndpointID string `json:"EndpointID"`
 	// IPAddress is the container's IPv4 address on the network.
 	IPAddress string `json:"IPAddress"`
 	// Aliases are the names the container has on the network, such as its
@@ -271,6 +277,14 @@ func (c *Client) ListTasks(ctx context.Context, opts TaskListOptions) ([]Task, e
 		return nil, err
 	}
 	return out, nil
+}
+
+// InspectTask returns the Swarm task with the given ID. The daemon must
+// be a Swarm manager.
+func (c *Client) InspectTask(ctx context.Context, id string) (Task, error) {
+	var out Task
+	err := c.do(ctx, http.MethodGet, "/tasks/"+url.PathEscape(id), nil, nil, &out)
+	return out, err
 }
 
 // CreateContainer creates a container named name and returns its ID.
