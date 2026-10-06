@@ -314,7 +314,6 @@ The compose check relies on two facts that hold under Dokploy's default deployme
 Known limitations being worked on:
 
 - [#60](https://github.com/alebak/dokploy-tunnel/issues/60): remaining unsafe-target gaps in repeater resolution.
-- [#61](https://github.com/alebak/dokploy-tunnel/issues/61): repeater dials are bound to the target's IP, not to the target container.
 - [#62](https://github.com/alebak/dokploy-tunnel/issues/62): the reaper should remove only repeater containers the companion created.
 
 ## Releases and versioning
