@@ -54,6 +54,16 @@ type Container struct {
 		// "NET_ADMIN" or "CAP_SYS_ADMIN".
 		CapAdd  []string        `json:"CapAdd"`
 		Devices []DeviceMapping `json:"Devices"`
+		// DeviceRequests ask a device driver, such as NVIDIA's, for host
+		// devices like GPUs.
+		DeviceRequests []DeviceRequest `json:"DeviceRequests"`
+		// IpcMode is "host" for a container in the host's IPC namespace.
+		IpcMode string `json:"IpcMode"`
+		// UTSMode is "host" for a container in the host's UTS namespace.
+		UTSMode string `json:"UTSMode"`
+		// Sysctls are the kernel parameters set in the container's
+		// namespaces, such as "net.core.somaxconn".
+		Sysctls map[string]string `json:"Sysctls"`
 	} `json:"HostConfig"`
 	Mounts          []Mount `json:"Mounts"`
 	NetworkSettings struct {
@@ -64,9 +74,35 @@ type Container struct {
 
 // Mount is a volume or bind mount of a container.
 type Mount struct {
-	Type        string `json:"Type"`
+	// Type is "bind", "volume", "tmpfs", "npipe" or "cluster".
+	Type string `json:"Type"`
+	// Name is the volume's name, for a volume mount.
+	Name string `json:"Name"`
+	// Driver is the volume's driver, for a volume mount.
+	Driver string `json:"Driver"`
+	// Source is the host path: the volume's mountpoint for a volume
+	// mount.
 	Source      string `json:"Source"`
 	Destination string `json:"Destination"`
+}
+
+// DeviceRequest asks a device driver for host devices.
+type DeviceRequest struct {
+	Driver       string     `json:"Driver"`
+	Count        int        `json:"Count"`
+	DeviceIDs    []string   `json:"DeviceIDs"`
+	Capabilities [][]string `json:"Capabilities"`
+}
+
+// Volume is a Docker volume, reduced to the fields the companion uses.
+type Volume struct {
+	Name   string `json:"Name"`
+	Driver string `json:"Driver"`
+	// Options are the driver's options. The local driver mounts Options
+	// "device" with mount(8) options "o" and file system "type"; "o"
+	// containing "bind" makes it a bind mount of the host path "device".
+	Options    map[string]string `json:"Options"`
+	Mountpoint string            `json:"Mountpoint"`
 }
 
 // DeviceMapping is a host device passed into a container.
@@ -131,13 +167,33 @@ type ContainerSpec struct {
 	Mounts []ServiceMount `json:"Mounts"`
 	// CapabilityAdd are the capabilities added to the default set.
 	CapabilityAdd []string `json:"CapabilityAdd"`
+	// Sysctls are the kernel parameters set in the tasks' namespaces.
+	// Swarm has no device mappings or device requests to report.
+	Sysctls map[string]string `json:"Sysctls"`
 }
 
 // ServiceMount is a mount of a Swarm service's containers.
 type ServiceMount struct {
-	Type   string `json:"Type"`
-	Source string `json:"Source"`
-	Target string `json:"Target"`
+	// Type is "bind", "volume", "tmpfs", "npipe" or "cluster".
+	Type string `json:"Type"`
+	// Source is a host path for a bind mount, a volume name for a volume
+	// mount.
+	Source        string                `json:"Source"`
+	Target        string                `json:"Target"`
+	VolumeOptions *ServiceVolumeOptions `json:"VolumeOptions,omitempty"`
+}
+
+// ServiceVolumeOptions configure a volume mount of a Swarm service. Each
+// node creates the volume from DriverConfig when it does not have it yet.
+type ServiceVolumeOptions struct {
+	DriverConfig *VolumeDriverConfig `json:"DriverConfig,omitempty"`
+}
+
+// VolumeDriverConfig is the driver, and its options, a Swarm service's
+// volume is created with.
+type VolumeDriverConfig struct {
+	Name    string            `json:"Name"`
+	Options map[string]string `json:"Options"`
 }
 
 // Task is a Swarm task: one replica of a service, reduced to the fields
@@ -244,6 +300,13 @@ func (c *Client) InspectContainer(ctx context.Context, id string) (Container, er
 func (c *Client) InspectNetwork(ctx context.Context, id string) (Network, error) {
 	var out Network
 	err := c.do(ctx, http.MethodGet, "/networks/"+url.PathEscape(id), nil, nil, &out)
+	return out, err
+}
+
+// InspectVolume returns the volume with the given name.
+func (c *Client) InspectVolume(ctx context.Context, name string) (Volume, error) {
+	var out Volume
+	err := c.do(ctx, http.MethodGet, "/volumes/"+url.PathEscape(name), nil, nil, &out)
 	return out, err
 }
 

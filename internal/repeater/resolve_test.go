@@ -524,6 +524,14 @@ func TestResolve_RefusesHostLevelTargets(t *testing.T) {
 		{"mounting the host root", docker.ContainerSpec{Mounts: []docker.ServiceMount{{Type: "bind", Source: "/", Target: "/host"}}}},
 		{"adding SYS_ADMIN", docker.ContainerSpec{CapabilityAdd: []string{"CAP_SYS_ADMIN"}}},
 		{"adding all capabilities", docker.ContainerSpec{CapabilityAdd: []string{"all"}}},
+		{"binding the Docker data root", docker.ContainerSpec{Mounts: []docker.ServiceMount{{Type: "bind", Source: "/var/lib/docker", Target: "/data"}}}},
+		{"binding the containerd data root", docker.ContainerSpec{Mounts: []docker.ServiceMount{{Type: "bind", Source: "/var/lib/containerd/io.containerd.content.v1.content", Target: "/data"}}}},
+		{"creating a bind volume of /run", docker.ContainerSpec{Mounts: []docker.ServiceMount{bindVolumeMount("hostrun", "local", "bind", "/run")}}},
+		{"creating a bind volume with the default driver", docker.ContainerSpec{Mounts: []docker.ServiceMount{bindVolumeMount("hostroot", "", "rbind,ro", "/")}}},
+		{"creating a bind volume of the Docker data root", docker.ContainerSpec{Mounts: []docker.ServiceMount{bindVolumeMount("dockerdata", "local", "bind", "/var/lib/docker")}}},
+		{"creating a bind volume with a relative device", docker.ContainerSpec{Mounts: []docker.ServiceMount{bindVolumeMount("rel", "local", "bind", "run")}}},
+		{"setting a host-wide sysctl", docker.ContainerSpec{Sysctls: map[string]string{"kernel.panic": "1"}}},
+		{"setting a vm sysctl", docker.ContainerSpec{Sysctls: map[string]string{"vm.overcommit_memory": "1"}}},
 	}
 	for _, tt := range specs {
 		t.Run("Swarm service spec "+tt.name, func(t *testing.T) {
@@ -541,13 +549,132 @@ func TestResolve_RefusesHostLevelTargets(t *testing.T) {
 		fake := newFake(t)
 		svc := service("s1", "myapp-web")
 		svc.Spec.TaskTemplate.ContainerSpec.CapabilityAdd = []string{"NET_BIND_SERVICE", "CAP_CHOWN"}
-		svc.Spec.TaskTemplate.ContainerSpec.Mounts = []docker.ServiceMount{{Type: "bind", Source: "/srv/app", Target: "/data"}}
+		svc.Spec.TaskTemplate.ContainerSpec.Mounts = []docker.ServiceMount{
+			{Type: "bind", Source: "/srv/app", Target: "/data"},
+			{Type: "bind", Source: "/var/lib/app", Target: "/state"},
+			{Type: "volume", Source: "pgdata", Target: "/var/lib/postgresql/data"},
+			bindVolumeMount("appdata", "local", "bind", "/srv/appdata"),
+			{Type: "volume", Source: "nfsdata", Target: "/nfs", VolumeOptions: &docker.ServiceVolumeOptions{DriverConfig: &docker.VolumeDriverConfig{
+				Name: "local", Options: map[string]string{"type": "nfs", "o": "addr=10.0.0.2,rw", "device": ":/export"}}}},
+		}
+		svc.Spec.TaskTemplate.ContainerSpec.Sysctls = map[string]string{"net.core.somaxconn": "1024", "kernel.shmmax": "68719476736", "fs.mqueue.msg_max": "64"}
 		swarmService{service: svc, container: "remote", addresses: map[string]string{"net-dokploy": "10.0.1.7/24"}}.add(fake)
 		_, err := newResolver(t, fake).resolve(testContext(t), Target{Kind: KindSwarmService, AppName: "myapp-web"})
 		if err != nil && strings.Contains(err.Error(), "refusing") {
 			t.Fatalf("resolve error = %v, want the service accepted", err)
 		}
 	})
+}
+
+// bindVolumeMount is a Swarm volume mount that creates volume name with
+// driver and the local driver's bind options.
+func bindVolumeMount(name, driver, o, device string) docker.ServiceMount {
+	return docker.ServiceMount{Type: "volume", Source: name, Target: "/data", VolumeOptions: &docker.ServiceVolumeOptions{
+		DriverConfig: &docker.VolumeDriverConfig{Name: driver, Options: map[string]string{"type": "none", "o": o, "device": device}}}}
+}
+
+// A named volume of the local driver with bind options reports a source
+// under /var/lib/docker/volumes, so the volume itself must be inspected.
+func TestResolve_JudgesNamedVolumes(t *testing.T) {
+	bindVolume := func(name, o, device string) *docker.Volume {
+		return &docker.Volume{Name: name, Driver: "local", Mountpoint: "/var/lib/docker/volumes/" + name + "/_data",
+			Options: map[string]string{"type": "none", "o": o, "device": device}}
+	}
+	tests := []struct {
+		name   string
+		volume *docker.Volume
+		unsafe bool
+	}{
+		{"bind volume of /run", bindVolume("vol", "bind", "/run"), true},
+		{"rbind volume of the host root", bindVolume("vol", "rbind,ro", "/"), true},
+		{"bind volume of the Docker data root", bindVolume("vol", "bind", "/var/lib/docker"), true},
+		{"bind volume of a rootless runtime dir", bindVolume("vol", "ro,bind", "/run/user/1000"), true},
+		{"bind volume with a relative device", bindVolume("vol", "bind", "run"), true},
+		{"missing volume", nil, true},
+		{"ext4 volume of a host disk", &docker.Volume{Name: "vol", Driver: "local", Mountpoint: "/var/lib/docker/volumes/vol/_data",
+			Options: map[string]string{"type": "ext4", "device": "/dev/sda1"}}, true},
+		{"plain named volume", &docker.Volume{Name: "vol", Driver: "local", Mountpoint: "/var/lib/docker/volumes/vol/_data"}, false},
+		{"bind volume of an app directory", bindVolume("vol", "bind", "/srv/app"), false},
+		{"bind volume of /var/lib/app", bindVolume("vol", "bind", "/var/lib/app"), false},
+		{"NFS volume", &docker.Volume{Name: "vol", Driver: "local", Mountpoint: "/var/lib/docker/volumes/vol/_data",
+			Options: map[string]string{"type": "nfs", "o": "addr=10.0.0.2,rw", "device": ":/export"}}, false},
+		{"CIFS volume", &docker.Volume{Name: "vol", Driver: "local", Mountpoint: "/var/lib/docker/volumes/vol/_data",
+			Options: map[string]string{"type": "cifs", "o": "addr=10.0.0.2,username=app", "device": "//10.0.0.2/share"}}, false},
+		{"tmpfs volume", &docker.Volume{Name: "vol", Driver: "local", Mountpoint: "/var/lib/docker/volumes/vol/_data",
+			Options: map[string]string{"type": "tmpfs", "o": "size=100m", "device": "tmpfs"}}, false},
+		{"volume of another driver", &docker.Volume{Name: "vol", Driver: "rexray", Options: map[string]string{"o": "bind", "device": "/run"}}, false},
+	}
+	mounts := []docker.Mount{{Type: "volume", Name: "vol", Driver: "local", Source: "/var/lib/docker/volumes/vol/_data", Destination: "/data"}}
+	check := func(t *testing.T, err error, unsafe bool) {
+		t.Helper()
+		refused := errors.Is(err, ErrTargetUnreachable) && strings.Contains(err.Error(), "refusing")
+		if refused != unsafe {
+			t.Fatalf("resolve error = %v, want refused = %v", err, unsafe)
+		}
+	}
+	for _, tt := range tests {
+		t.Run("compose "+tt.name, func(t *testing.T) {
+			fake := newFake(t)
+			if tt.volume != nil {
+				fake.AddVolume(*tt.volume)
+			}
+			fake.AddContainer(dockertest.Container{ID: "c1", Name: "myapp-postgres-1", Running: true, Labels: composeLabels("myapp", "postgres"),
+				Networks: map[string][]string{"myapp_default": nil}, Mounts: mounts})
+			_, err := newResolver(t, fake).resolve(testContext(t), Target{Kind: KindCompose, AppName: "myapp", Service: "postgres"})
+			check(t, err, tt.unsafe)
+		})
+		t.Run("Swarm "+tt.name, func(t *testing.T) {
+			fake := newFake(t)
+			if tt.volume != nil {
+				fake.AddVolume(*tt.volume)
+			}
+			fake.AddContainer(dockertest.Container{ID: "c1", Name: "myapp-web.1.x", Running: true, Labels: swarmLabels("myapp-web"),
+				Networks: map[string][]string{"dokploy-network": nil}, Mounts: mounts})
+			swarmService{service: service("s1", "myapp-web"), container: "c1",
+				addresses: map[string]string{"net-dokploy": "10.0.1.7/24"}}.add(fake)
+			_, err := newResolver(t, fake).resolve(testContext(t), Target{Kind: KindSwarmService, AppName: "myapp-web"})
+			check(t, err, tt.unsafe)
+		})
+	}
+}
+
+func TestBindExposesHost(t *testing.T) {
+	tests := []struct {
+		source string
+		want   bool
+	}{
+		{"/var/run/docker.sock", true},
+		{"/run", true},
+		{"/", true},
+		{"/var/lib", true},
+		{"/var/lib/docker", true},
+		{"/var/lib/docker/", true},
+		{"/var/lib/docker/containers", true},
+		{"/var/lib/docker/overlay2/abc/merged", true},
+		{"/var/lib/docker/volumes/other/_data", true},
+		{"/var/lib/containerd", true},
+		{"/var/lib/containerd/io.containerd.snapshotter.v1.overlayfs", true},
+		{"/var/lib/containers/storage", true},
+		{"/home/me/.local/share/docker", true},
+		{"/home/me/.local/share/docker/overlay2", true},
+		{"/home/me/.local/share", true},
+		{"/home/me/.local", true},
+		{"/var/lib/./docker/../docker", true},
+		{"", false},
+		{"myvolume", false},
+		{"/var/lib/app", false},
+		{"/var/lib/dockerd", false},
+		{"/var/lib/docker-backup", false},
+		{"/var/lib/postgresql/data", false},
+		{"/home/me/.local/share/app", false},
+		{"/home/me/.local/share/docker-compose", false},
+		{"/srv/app", false},
+	}
+	for _, tt := range tests {
+		if got := bindExposesHost(tt.source); got != tt.want {
+			t.Errorf("bindExposesHost(%q) = %v, want %v", tt.source, got, tt.want)
+		}
+	}
 }
 
 func TestMountExposesHost(t *testing.T) {
@@ -617,6 +744,25 @@ func TestUnsafeContainer(t *testing.T) {
 		{"BPF", ctr(func(c *docker.Container) { c.HostConfig.CapAdd = []string{"bpf"} }), true},
 		{"PERFMON", ctr(func(c *docker.Container) { c.HostConfig.CapAdd = []string{"PERFMON"} }), true},
 		{"ALL", ctr(func(c *docker.Container) { c.HostConfig.CapAdd = []string{"CHOWN", "ALL"} }), true},
+		{"host IPC namespace", ctr(func(c *docker.Container) { c.HostConfig.IpcMode = "host" }), true},
+		{"shareable IPC namespace", ctr(func(c *docker.Container) { c.HostConfig.IpcMode = "shareable" }), false},
+		{"host UTS namespace", ctr(func(c *docker.Container) { c.HostConfig.UTSMode = "host" }), true},
+		{"GPU request", ctr(func(c *docker.Container) {
+			c.HostConfig.DeviceRequests = []docker.DeviceRequest{{Driver: "nvidia", Count: -1, Capabilities: [][]string{{"gpu"}}}}
+		}), true},
+		{"host-wide sysctl", ctr(func(c *docker.Container) { c.HostConfig.Sysctls = map[string]string{"kernel.panic": "1"} }), true},
+		{"namespaced sysctls", ctr(func(c *docker.Container) {
+			c.HostConfig.Sysctls = map[string]string{"net.core.somaxconn": "1024", "kernel.shmmax": "68719476736", "kernel.sem": "250 32000 100 128"}
+		}), false},
+		{"bind of the Docker data root", ctr(func(c *docker.Container) { c.HostConfig.Binds = []string{"/var/lib/docker:/docker"} }), true},
+		{"mount of the containerd data root", ctr(func(c *docker.Container) {
+			c.Mounts = []docker.Mount{{Type: "bind", Source: "/var/lib/containerd", Destination: "/c"}}
+		}), true},
+		{"bind of another volume's data", ctr(func(c *docker.Container) {
+			c.Mounts = []docker.Mount{{Type: "bind", Source: "/var/lib/docker/volumes/other/_data", Destination: "/other"}}
+		}), true},
+		{"bind of a rootless data root", ctr(func(c *docker.Container) { c.HostConfig.Binds = []string{"/home/me/.local/share/docker:/d:ro"} }), true},
+		{"bind of /var/lib/app", ctr(func(c *docker.Container) { c.HostConfig.Binds = []string{"/var/lib/app:/app"} }), false},
 		{"harmless capabilities", ctr(func(c *docker.Container) { c.HostConfig.CapAdd = []string{"NET_BIND_SERVICE", "CAP_CHOWN"} }), false},
 		{"bind of /var/run", ctr(func(c *docker.Container) { c.HostConfig.Binds = []string{"/var/run:/host/run:ro"} }), true},
 		{"bind of a rootless runtime dir", ctr(func(c *docker.Container) { c.HostConfig.Binds = []string{"/run/user/1000:/xdg"} }), true},
@@ -635,6 +781,34 @@ func TestUnsafeContainer(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			if why := unsafeContainer(tt.ctr); (why != "") != tt.unsafe {
 				t.Errorf("unsafeContainer() = %q, want unsafe = %v", why, tt.unsafe)
+			}
+		})
+	}
+}
+
+func TestHostSysctl(t *testing.T) {
+	tests := []struct {
+		name string
+		key  string
+		host bool
+	}{
+		{"IPC parameter", "kernel.shmmax", false},
+		{"message queue parameter", "fs.mqueue.msg_max", false},
+		{"network parameter", "net.core.somaxconn", false},
+		{"UTS domain name", "kernel.domainname", false},
+		{"user namespace counter", "user.max_user_namespaces", false},
+		{"slash-separated network parameter", "net/ipv4/ip_forward", false},
+		{"slash-separated IPC parameter", "kernel/shmmax", false},
+		{"host-wide kernel parameter", "kernel.panic", true},
+		{"slash-separated host-wide parameter", "kernel/panic", true},
+		{"vm parameter", "vm.overcommit_memory", true},
+		{"hostname, which runc refuses", "kernel.hostname", true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := hostSysctl(map[string]string{tt.key: "1"}) != ""
+			if got != tt.host {
+				t.Errorf("hostSysctl(%q) reported host-wide = %v, want %v", tt.key, got, tt.host)
 			}
 		})
 	}

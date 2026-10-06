@@ -332,6 +332,22 @@ func TestClient_InspectNetworkAndService(t *testing.T) {
 	}
 }
 
+func TestClient_InspectVolume(t *testing.T) {
+	fake := dockertest.New(t)
+	fake.AddVolume(docker.Volume{Name: "hostrun", Driver: "local", Mountpoint: "/var/lib/docker/volumes/hostrun/_data",
+		Options: map[string]string{"type": "none", "o": "bind", "device": "/run"}})
+	c := newClient(t, fake)
+	ctx := testContext(t)
+
+	v, err := c.InspectVolume(ctx, "hostrun")
+	if err != nil || v.Driver != "local" || v.Options["o"] != "bind" || v.Options["device"] != "/run" {
+		t.Errorf("InspectVolume = %+v, %v", v, err)
+	}
+	if _, err := c.InspectVolume(ctx, "other"); !docker.IsNotFound(err) {
+		t.Errorf("InspectVolume missing: error = %v, want not found", err)
+	}
+}
+
 func TestClient_DaemonUnreachable(t *testing.T) {
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
