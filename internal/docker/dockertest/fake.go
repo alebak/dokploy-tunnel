@@ -55,6 +55,12 @@ type Container struct {
 	SecurityOpt   []string
 	MaskedPaths   []string
 	ReadonlyPaths []string
+	// User, CapAdd, CapDrop and ReadonlyRootfs are reported in the
+	// container's inspection.
+	User           string
+	CapAdd         []string
+	CapDrop        []string
+	ReadonlyRootfs bool
 }
 
 // ExecConfig is an exec the fake daemon was asked to create.
@@ -84,6 +90,10 @@ type Fake struct {
 	// CreateError, when set, fails every container creation with this
 	// status and message.
 	CreateError *docker.APIError
+	// LegacyExecStart, when set, answers exec starts with 200 and the raw
+	// stream right after the headers, as very old daemons do, instead of
+	// 101.
+	LegacyExecStart bool
 	// Intercept, when set, sees every request first; it returns true when
 	// it answered the request itself.
 	Intercept func(w http.ResponseWriter, r *http.Request) bool
@@ -162,6 +172,10 @@ func (f *Fake) AddContainer(c Container) {
 	dc.HostConfig.SecurityOpt = c.SecurityOpt
 	dc.HostConfig.MaskedPaths = c.MaskedPaths
 	dc.HostConfig.ReadonlyPaths = c.ReadonlyPaths
+	dc.Config.User = c.User
+	dc.HostConfig.CapAdd = c.CapAdd
+	dc.HostConfig.CapDrop = c.CapDrop
+	dc.HostConfig.ReadonlyRootfs = c.ReadonlyRootfs
 	dc.Mounts = c.Mounts
 	dc.NetworkSettings.Networks = map[string]docker.EndpointSettings{}
 	for name, aliases := range c.Networks {
@@ -421,7 +435,7 @@ func (f *Fake) serve(w http.ResponseWriter, r *http.Request) {
 	}
 	parts := strings.Split(strings.Trim(path, "/"), "/")
 	switch {
-	case r.Method == http.MethodGet && path == "/_ping":
+	case (r.Method == http.MethodGet || r.Method == http.MethodHead) && path == "/_ping":
 		_, _ = io.WriteString(w, "OK")
 	case r.Method == http.MethodGet && path == "/info":
 		f.info(w)
@@ -552,6 +566,11 @@ func (f *Fake) createContainer(w http.ResponseWriter, r *http.Request) {
 	c.State.Status = "created"
 	c.Config.Image = cfg.Image
 	c.Config.Labels = cfg.Labels
+	c.Config.User = cfg.User
+	c.HostConfig.NetworkMode = cfg.HostConfig.NetworkMode
+	c.HostConfig.ReadonlyRootfs = cfg.HostConfig.ReadonlyRootfs
+	c.HostConfig.CapDrop = cfg.HostConfig.CapDrop
+	c.HostConfig.SecurityOpt = cfg.HostConfig.SecurityOpt
 	c.NetworkSettings.Networks = map[string]docker.EndpointSettings{}
 	if mode := cfg.HostConfig.NetworkMode; mode != "" {
 		n, ok := f.network(mode)
@@ -732,7 +751,7 @@ func (f *Fake) createExec(w http.ResponseWriter, r *http.Request, id string) {
 func (f *Fake) startExec(w http.ResponseWriter, r *http.Request, id string) {
 	f.mu.Lock()
 	cfg, ok := f.execs[id]
-	handler := f.ExecHandler
+	handler, legacy := f.ExecHandler, f.LegacyExecStart
 	f.mu.Unlock()
 	if !ok {
 		apiError(w, http.StatusNotFound, "No such exec instance: "+id)
@@ -757,7 +776,11 @@ func (f *Fake) startExec(w http.ResponseWriter, r *http.Request, id string) {
 	f.running.Add(1)
 	defer f.running.Done()
 	defer conn.Close()
-	_, _ = io.WriteString(conn, "HTTP/1.1 101 UPGRADED\r\nContent-Type: application/vnd.docker.multiplexed-stream\r\nConnection: Upgrade\r\nUpgrade: tcp\r\n\r\n")
+	if legacy {
+		_, _ = io.WriteString(conn, "HTTP/1.1 200 OK\r\nContent-Type: application/vnd.docker.multiplexed-stream\r\n\r\n")
+	} else {
+		_, _ = io.WriteString(conn, "HTTP/1.1 101 UPGRADED\r\nContent-Type: application/vnd.docker.multiplexed-stream\r\nConnection: Upgrade\r\nUpgrade: tcp\r\n\r\n")
+	}
 
 	if handler == nil {
 		return

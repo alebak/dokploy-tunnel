@@ -36,7 +36,9 @@ type Container struct {
 		StartedAt string `json:"StartedAt"`
 	} `json:"State"`
 	Config struct {
-		Image  string            `json:"Image"`
+		Image string `json:"Image"`
+		// User is the user the container runs as, such as "65534:65534".
+		User   string            `json:"User"`
 		Labels map[string]string `json:"Labels"`
 		// ExposedPorts are keyed like "5432/tcp".
 		ExposedPorts map[string]struct{} `json:"ExposedPorts"`
@@ -52,8 +54,13 @@ type Container struct {
 		PidMode string `json:"PidMode"`
 		// CapAdd are the capabilities added to the default set, such as
 		// "NET_ADMIN" or "CAP_SYS_ADMIN".
-		CapAdd  []string        `json:"CapAdd"`
+		CapAdd []string `json:"CapAdd"`
+		// CapDrop are the capabilities removed from the default set; "ALL"
+		// removes every one.
+		CapDrop []string        `json:"CapDrop"`
 		Devices []DeviceMapping `json:"Devices"`
+		// ReadonlyRootfs reports a read-only root file system.
+		ReadonlyRootfs bool `json:"ReadonlyRootfs"`
 		// DeviceRequests ask a device driver, such as NVIDIA's, for host
 		// devices like GPUs.
 		DeviceRequests []DeviceRequest `json:"DeviceRequests"`
@@ -416,7 +423,7 @@ func (c *Client) RemoveContainer(ctx context.Context, id string) error {
 // PullImage pulls ref, such as "alpine/socat:1.8.1.1" or one pinned with
 // "@sha256:...", and waits until the pull ends. A digest wins over a tag.
 func (c *Client) PullImage(ctx context.Context, ref string) error {
-	name, tag := splitReference(ref)
+	name, tag := SplitReference(ref)
 	q := url.Values{"fromImage": {name}, "tag": {tag}}
 	req, err := c.newRequest(ctx, http.MethodPost, "/images/create", q, nil)
 	if err != nil {
@@ -448,9 +455,9 @@ func (c *Client) PullImage(ctx context.Context, ref string) error {
 	return nil
 }
 
-// splitReference splits an image reference into the fromImage and tag
+// SplitReference splits an image reference into the fromImage and tag
 // parameters of a pull: the digest when there is one, else the tag.
-func splitReference(ref string) (name, tag string) {
+func SplitReference(ref string) (name, tag string) {
 	if name, digest, ok := strings.Cut(ref, "@"); ok {
 		if i := strings.LastIndex(name, ":"); i > strings.LastIndex(name, "/") {
 			name = name[:i]

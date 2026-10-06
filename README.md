@@ -289,7 +289,34 @@ Docker networks are segmented, so the companion never joins tenant networks itse
 - Each dial is bound to the target's identity, not only to its address, because Docker may hand the address of a stopped container to another one on the same network. Just before socat runs, the companion checks that the container it resolved still runs and holds that address, and records its start time and network endpoint, which Docker renews on every start and reconnection. Once socat has connected, and before the tunnel carries any byte, it checks them again and closes the tunnel with `target_unreachable` if they changed: an unchanged container held the address throughout, so the connection reached it. A Swarm task on another node cannot be inspected and is checked by its task ID and address instead; tasks never restart, so this holds as long as the Swarm manager's view is current, which can lag the node by a few seconds. That lag is the remaining window.
 - Concurrent tunnels to one target share its repeater, which is removed when the last tunnel has been closed for the grace period. Repeaters left behind by a stopped companion are removed at startup and every minute once older than the reaper TTL, without their volumes. Since anyone who can create containers can copy a repeater's label, name and image, the companion also labels each repeater with `dev.doktunnel.ownership`, an HMAC-SHA256 of its name keyed by the repeater key, and only removes containers whose label verifies with that key; look-alikes are kept and logged once. The key outlives restarts in the repeater key file. If the default location is unusable, the companion warns and uses a key of its own process, so repeaters left behind before a restart are kept instead of removed; a key file given explicitly must be usable or the companion exits.
 
-The companion therefore needs the Docker socket, which is root-equivalent on the host. Running it behind a least-privilege socket proxy is tracked in [#9](https://github.com/alebak/dokploy-tunnel/issues/9). The companion warns at startup when `--docker-host` is a `tcp://` address outside the loopback interface: keep such an endpoint on a network only the companion joins.
+The companion therefore needs Docker access, and the Docker socket is root-equivalent on the host. Give it the [socket proxy](#socket-proxy) instead of the socket. The companion warns at startup when `--docker-host` is a `tcp://` address outside the loopback interface: keep such an endpoint on a network only the companion joins.
+
+### Socket proxy
+
+`doktunnel-socket-proxy` holds the Docker socket in place of the companion and forwards only the Docker API calls the companion makes, so a compromised companion cannot run arbitrary containers. Run it as its own service on a network only the companion joins, and point the companion at it with `--docker-host tcp://<proxy>:2375`. It serves plain HTTP with no authentication; never publish its port.
+
+| Flag | Environment variable | Default | Purpose |
+|------|----------------------|---------|---------|
+| `--listen` | `DOKTUNNEL_SOCKET_PROXY_LISTEN` | `:2375` | TCP address to serve on |
+| `--docker-host` | `DOCKER_HOST` | `unix:///var/run/docker.sock` | Docker daemon: `unix:///path` or plain `tcp://host:port` |
+| `--repeater-image` | `DOKTUNNEL_SOCKET_PROXY_REPEATER_IMAGE` | `alpine/socat:1.8.1.1@sha256:7f9a…` | The only image repeaters may run; it must equal the companion's `--repeater-image` |
+| `--version` | | | Print the version and exit |
+
+Allowed calls, with or without a `/vX.Y` version prefix:
+
+| Call | Restrictions |
+|------|--------------|
+| `GET`/`HEAD /_ping`, `GET /info` | No query parameters |
+| `GET /containers/json` | Only `all` and `filters` with `label` keys |
+| `GET /containers/{id}/json`, `/networks/{id}`, `/volumes/{name}`, `/services/{id}`, `/tasks/{id}` | No query parameters |
+| `GET /tasks` | Only `filters` with `service` and `desired-state` keys |
+| `POST /containers/create` | Name `doktunnel-repeater-*`; the body must be exactly a repeater's: the repeater image running `sleep infinity` as `65534:65534`, the repeater labels and no others, and a host configuration of one network (not `host`, `none` or `container:*`), a read-only root filesystem, `CapDrop: ALL`, `no-new-privileges`, an init, and limits of at most 256 processes and 64 MiB. The network is inspected through the daemon: a missing one gets the daemon's `404`, one with the `host` or `null` driver is refused under any name or ID, and the container is created on its full ID. Unknown fields are refused at every level, and the checked configuration is re-encoded before it is forwarded |
+| `POST /images/create` | Only `fromImage` and `tag` of the repeater image |
+| `POST /containers/{id}/start`, `DELETE /containers/{id}` | Only containers labeled `dev.doktunnel.repeater=1`, named `doktunnel-repeater-*`, running the repeater image and confined like a repeater (unprivileged, as `65534:65534`, on a network rather than `host`, `none` or `container:*`, with `CapDrop: ALL` and no added capabilities, `no-new-privileges`, a read-only root filesystem and no binds or mounts), as the daemon reports them; removal takes only `force`, never `v` |
+| `POST /containers/{id}/exec` | Same containers; the command must be `socat -d -d STDIO TCP:<ip>:<port>,connect-timeout=<seconds>` with a literal IP address, attached, without a TTY |
+| `POST /exec/{id}/start` | Only execs created through the proxy, once, attached and upgraded to a raw stream |
+
+Every other call is refused with `403` and a Docker-style `{"message": "..."}` body, and logged. A client gets 10 seconds to send a request's headers, 30 more for its body, and 2 minutes between requests on a kept-alive connection; exec streams and the daemon's answers are not bounded. Errors from the daemon are passed through unchanged. Whoever reaches the proxy can still read every container's configuration, including its environment variables, and connect to any address on the networks repeaters join.
 
 ### Security and permissions
 
