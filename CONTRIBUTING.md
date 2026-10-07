@@ -2,6 +2,17 @@
 
 Thanks for your interest in contributing. dokploy-tunnel is a community project and is not affiliated with Dokploy.
 
+By taking part you agree to follow the [Code of Conduct](CODE_OF_CONDUCT.md).
+
+## Before you start
+
+| You want to | Do this |
+|-------------|---------|
+| Report a security vulnerability | Follow [SECURITY.md](SECURITY.md). Never open a public issue for it. |
+| Add a feature or make a larger change | [Open an issue](https://github.com/alebak/dokploy-tunnel/issues/new/choose) first, using the issue forms, and agree on the approach. |
+| Fix a typo, a doc or a small bug | Open a pull request directly. |
+| Report a problem with Dokploy itself | Report it [upstream](https://github.com/Dokploy/dokploy/issues). |
+
 ## Getting started
 
 ### Prerequisites
@@ -19,6 +30,37 @@ go build ./...
 go test ./...
 go run ./cmd/doktunnel --version
 ```
+
+### Tests that only run in CI
+
+Unit tests (`go test ./...`) run everywhere and are all you need locally. Two suites sit behind build tags and only run in CI:
+
+| Suite | Build tag | What it touches | Locally |
+|-------|-----------|-----------------|---------|
+| Platform | `platform` | The real hosts file (with sudo or Administrator) and loopback addresses | Never run it. It also skips unless `DOKTUNNEL_PLATFORM_TESTS=1` on GitHub Actions. |
+| Docker integration | `integration` | A real Docker daemon; it creates containers and needs `DOKTUNNEL_INTEGRATION=1` | Do not run it against your own daemon unless you accept that it creates and removes containers there. |
+
+You can still compile-check both:
+
+```sh
+go vet -tags platform ./internal/platformtest/
+go vet -tags integration ./...
+```
+
+### Agent skill golden file
+
+`internal/cli/testdata/skill.golden` holds the expected `doktunnel --skill` output. When you add or change commands, flags or error codes, regenerate it and review the diff before committing:
+
+```sh
+go test ./internal/cli -run TestRun_SkillGolden -update
+git diff internal/cli/testdata/skill.golden
+```
+
+### Wire protocol
+
+The contract between `doktunnel` and `doktunnel-companion` is [docs/protocol.md](docs/protocol.md). Any change to how they talk to each other must update it in the same pull request.
+
+### Release archives
 
 To build release archives locally without publishing:
 
@@ -64,9 +106,16 @@ Write commit messages in English, with a lowercase subject and no trailing perio
 
 ### Pull requests
 
-- Pull requests are **squash-merged**. The PR title becomes the commit message on `main`, so it must be a valid Conventional Commit; a workflow checks this.
+1. Fork the repository and create a branch named as above.
+2. Commit, then push the branch to your fork.
+3. Open a pull request against `main` and fill in the template.
+
+`main` is protected: changes land only through pull requests, with linear history and required checks, and nobody can bypass that.
+
+- Pull requests are **squash-merged** by a maintainer. The PR title becomes the commit message on `main`, so it must be a valid Conventional Commit; a workflow checks this.
 - Keep each PR focused on one logical change.
-- CI must pass: `go vet`, `go build`, and `go test` on Linux, macOS, and Windows.
+- CI must pass: `go vet`, `go build`, and `go test` on Linux, macOS, and Windows, plus the platform, Docker integration, image, GoReleaser and PR title checks.
+- If this is your first contribution, a maintainer must approve the workflows before CI runs on your pull request. Expect a short delay.
 
 ## How releases happen
 
