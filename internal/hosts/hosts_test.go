@@ -232,30 +232,29 @@ func TestDesired(t *testing.T) {
 	key := func(id string) registry.Key {
 		return registry.Key{Instance: "https://panel.example.com", OrganizationID: "org1", ServiceID: id}
 	}
-	names := func(project, compose, service string) hostname.Names {
-		return hostname.Names{Context: "prod", Organization: "Acme", Project: project, Compose: compose, Service: service}
+	names := func(context, appName, service string) hostname.Names {
+		return hostname.Names{Context: context, AppName: appName, ComposeService: service}
 	}
 	t0 := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
 	leases := []registry.Lease{
 		// Listed by address, as registry.List returns them; the older lease
 		// keeps the plain name even though its address is higher.
-		{Key: key("pg-new"), IP: netip.MustParseAddr("127.77.0.1"), CreatedAt: t0.Add(time.Hour), Names: names("shop", "", "db")},
-		{Key: key("pg-old"), IP: netip.MustParseAddr("127.77.0.2"), CreatedAt: t0, Names: names("shop", "", "DB")},
-		{Key: key("cmp/postgres"), IP: netip.MustParseAddr("127.77.0.3"), CreatedAt: t0, Names: names("shop", "myapp", "postgres")},
+		{Key: key("pg-new"), IP: netip.MustParseAddr("127.77.0.1"), CreatedAt: t0.Add(time.Hour), Names: names("acme-staging", "acme-postgres-a1b2c3", "")},
+		{Key: key("pg-old"), IP: netip.MustParseAddr("127.77.0.2"), CreatedAt: t0, Names: names("acme-prod", "acme-postgres-a1b2c3", "")},
+		{Key: key("cmp/postgres"), IP: netip.MustParseAddr("127.77.0.3"), CreatedAt: t0, Names: names("acme-prod", "acme-billing-x1y2z3", "postgres")},
 		{Key: key("unnamed"), IP: netip.MustParseAddr("127.77.0.4"), CreatedAt: t0},
+		// Named by an older doktunnel: the lease has a context but no
+		// appName until it is forwarded again.
+		{Key: key("old-format"), IP: netip.MustParseAddr("127.77.0.5"), CreatedAt: t0, Names: hostname.Names{Context: "acme-prod"}},
 	}
 	got, err := Desired(leases)
 	if err != nil {
 		t.Fatalf("Desired: %v", err)
 	}
-	suffixed := got[0].Hostname
-	if !strings.HasPrefix(suffixed, "db-") || !strings.HasSuffix(suffixed, ".shop.acme.prod.internal") {
-		t.Errorf("newer colliding lease = %q, want a disambiguated db-<hash> name", suffixed)
-	}
 	want := entries(
-		"127.77.0.1", suffixed,
-		"127.77.0.2", "db.shop.acme.prod.internal",
-		"127.77.0.3", "postgres.myapp.shop.acme.prod.internal",
+		"127.77.0.1", "acme-postgres-a1b2c3.acme-staging.internal",
+		"127.77.0.2", "acme-postgres-a1b2c3.internal",
+		"127.77.0.3", "postgres.acme-billing-x1y2z3.internal",
 	)
 	if !equalEntries(got, want) {
 		t.Errorf("Desired = %v, want %v", got, want)
@@ -263,9 +262,10 @@ func TestDesired(t *testing.T) {
 }
 
 func TestParseEntries_ValidatesHelperInput(t *testing.T) {
-	ok := "127.77.0.1\tdb.p.o.c.internal\n127.77.0.2 web.p.o.c.internal\n"
+	ok := "127.77.0.1\tdb.p.o.c.internal\n127.77.0.2 acme-postgres-a1b2c3.internal\n" +
+		"127.77.0.3\tpostgres.acme-billing-x1y2z3.internal\n"
 	got, err := ParseEntries([]byte(ok))
-	if err != nil || len(got) != 2 {
+	if err != nil || len(got) != 3 {
 		t.Fatalf("ParseEntries(valid) = %v, %v", got, err)
 	}
 	if round, err := ParseEntries(FormatEntries(got)); err != nil || !equalEntries(round, got) {
@@ -273,18 +273,20 @@ func TestParseEntries_ValidatesHelperInput(t *testing.T) {
 	}
 
 	bad := map[string]string{
-		"not loopback":            "10.0.0.5\tdb.p.o.c.internal\n",
-		"IPv6":                    "::1\tdb.p.o.c.internal\n",
-		"not .internal":           "127.77.0.1\tdb.example.com\n",
-		"unsafe hostname":         "127.77.0.1\tDB;rm.p.o.c.internal\n",
-		"two names per line":      "127.77.0.1\ta.p.o.c.internal b.p.o.c.internal\n",
-		"duplicate hostname":      "127.77.0.1\ta.p.o.c.internal\n127.77.0.2\ta.p.o.c.internal\n",
-		"marker smuggled in":      EndLine + "\n",
-		"outside the lease range": "127.0.0.5\tdb.p.o.c.internal\n",
-		"docker host alias":       "127.0.0.1\thost.docker.internal\n",
-		"cloud metadata name":     "127.77.0.1\tmetadata.google.internal\n",
-		"too few labels":          "127.77.0.1\to.p.c.internal\n",
-		"too large":               strings.Repeat("127.77.0.1\ta.p.o.c.internal\n", maxEntriesSize/20),
+		"not loopback":               "10.0.0.5\tdb.p.o.c.internal\n",
+		"IPv6":                       "::1\tdb.p.o.c.internal\n",
+		"not .internal":              "127.77.0.1\tdb.example.com\n",
+		"unsafe hostname":            "127.77.0.1\tDB;rm.p.o.c.internal\n",
+		"two names per line":         "127.77.0.1\ta.p.o.c.internal b.p.o.c.internal\n",
+		"duplicate hostname":         "127.77.0.1\ta.p.o.c.internal\n127.77.0.2\ta.p.o.c.internal\n",
+		"marker smuggled in":         EndLine + "\n",
+		"outside the lease range":    "127.0.0.5\tdb.p.o.c.internal\n",
+		"docker host alias":          "127.0.0.1\thost.docker.internal\n",
+		"cloud metadata name":        "127.77.0.1\tmetadata.google.internal\n",
+		"docker host alias in range": "127.77.0.1\thost.docker.internal\n",
+		"podman host alias":          "127.77.0.1\thost.containers.internal\n",
+		"the TLD alone":              "127.77.0.1\tinternal\n",
+		"too large":                  strings.Repeat("127.77.0.1\ta.p.o.c.internal\n", maxEntriesSize/20),
 	}
 	for name, content := range bad {
 		t.Run(name, func(t *testing.T) {

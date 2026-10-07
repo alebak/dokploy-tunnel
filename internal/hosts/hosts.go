@@ -39,8 +39,8 @@ const (
 const maxEntriesSize = 4 << 20
 
 // minLabels is the fewest labels a doktunnel hostname has:
-// <service>.<project>.<org>.<context>.internal.
-const minLabels = 5
+// <appName>.internal.
+const minLabels = 2
 
 // ErrMalformed is wrapped by every error about a hosts file or entry list
 // that doktunnel refuses to merge.
@@ -201,11 +201,13 @@ func Clean(content []byte) []byte {
 
 // Desired computes the entries for the named leases: their hostnames are
 // assigned oldest lease first (see hostname.Assign), and the entries are
-// ordered by address. Leases without names are skipped.
+// ordered by address. Leases without an appName are skipped: they were never
+// named, or were named by an older doktunnel and get their name the next
+// time they are forwarded.
 func Desired(leases []registry.Lease) ([]Entry, error) {
 	named := make([]registry.Lease, 0, len(leases))
 	for _, l := range leases {
-		if l.Names != (hostname.Names{}) {
+		if l.Names.AppName != "" {
 			named = append(named, l)
 		}
 	}
@@ -248,10 +250,11 @@ func FormatEntries(entries []Entry) []byte {
 
 // ParseEntries reads entries written by FormatEntries and validates them
 // strictly: each line holds one address in registry.DefaultRange and one
-// .internal hostname of at least minLabels labels, and no hostname repeats.
-// The privileged helper uses it, so nothing else can reach the hosts file
-// through it: not the 127.0.0.1 names other tools rely on, such as
-// host.docker.internal, nor short names such as metadata.google.internal.
+// .internal hostname of at least minLabels labels that is not
+// hostname.Reserved, and no hostname repeats. The privileged helper uses
+// it, so nothing else can reach the hosts file through it: not the
+// 127.0.0.1 names other tools rely on, such as host.docker.internal, nor
+// names such as metadata.google.internal.
 //
 // Errors name the line, never its contents: the helper runs as root, and
 // whatever it was handed must not leak back through its error messages.
@@ -277,7 +280,7 @@ func ParseEntries(content []byte) ([]Entry, error) {
 			return nil, bad(fmt.Sprintf("the address is not in %v", registry.DefaultRange))
 		}
 		host := fields[1]
-		if !hostname.Valid(host) || strings.Count(host, ".")+1 < minLabels {
+		if !hostname.Valid(host) || strings.Count(host, ".")+1 < minLabels || hostname.Reserved(host) {
 			return nil, bad(fmt.Sprintf("the hostname is not a doktunnel .%s hostname", hostname.TLD))
 		}
 		if seen[host] {

@@ -1,11 +1,13 @@
 // Package hostname derives the stable `.internal` hostnames doktunnel writes
 // to the hosts file for forwarded services.
 //
-// A Dokploy service is named <service>.<project>.<org>.<context>.internal and
-// a service inside a compose stack <service>.<compose>.<project>.<org>.<context>.internal.
-// Every label is built from a display name by Label, so it is DNS-safe, and
-// Assign guarantees that two targets never share a hostname, even when their
-// names only differ in characters that sanitization drops.
+// An application or database is named <appName>.internal, and a service
+// inside a compose stack <service>.<appName>.internal, where appName is the
+// name Dokploy deploys the service or the stack under, such as
+// acme-billing-x1y2z3. Every label is built by Label, so it is DNS-safe, and
+// Assign guarantees that two targets never share a hostname: a target whose
+// plain name is already taken gets its doktunnel context as an extra label,
+// <appName>.<context>.internal, and a hash of its ID when that is taken too.
 package hostname
 
 import (
@@ -23,11 +25,9 @@ const TLD = "internal"
 const (
 	// maxLabel is the longest DNS label (RFC 1035).
 	maxLabel = 63
-	// maxName is the longest hostname, without the trailing dot.
+	// maxName is the longest hostname, without the trailing dot. Three
+	// labels of maxLabel bytes, their dots and the TLD stay within it.
 	maxName = 253
-	// shortLabel caps every label when the full-length labels would exceed
-	// maxName: five labels of 40 bytes, their dots and the TLD fit in 213.
-	shortLabel = 40
 	// labelHashLen is the length of the hash that keeps cut labels distinct.
 	labelHashLen = 8
 )
@@ -36,66 +36,69 @@ const (
 // colliding hostnames.
 var suffixLens = []int{6, 8, 10, 12, 16}
 
-// ErrIncomplete means a required display name is empty.
-var ErrIncomplete = errors.New("hostname needs context, organization, project and service names")
+// reserved are names other software resolves under .internal, such as
+// host.docker.internal and metadata.google.internal. doktunnel never claims
+// them, nor any name below them, so its hosts file entries cannot shadow
+// them.
+var reserved = []string{
+	"docker." + TLD,
+	"containers." + TLD,
+	"google." + TLD,
+	"lima." + TLD,
+	"orb." + TLD,
+	"rancher-desktop." + TLD,
+}
 
-// Names are the display names a hostname is built from.
+// ErrIncomplete means a required name is empty.
+var ErrIncomplete = errors.New("hostname needs a context name and an appName")
+
+// Names are what a hostname is built from.
 type Names struct {
-	// Context is the doktunnel context name.
+	// Context is the doktunnel context name. It only appears in a hostname
+	// whose plain form another target already holds.
 	Context string `json:"context"`
-	// Organization is the Dokploy organization name.
-	Organization string `json:"organization"`
-	// Project is the Dokploy project name.
-	Project string `json:"project"`
-	// Compose is the compose stack name for a service inside a compose
-	// stack; it is empty for Dokploy services.
-	Compose string `json:"compose,omitempty"`
-	// Service is the Dokploy service name, or the service name in the
-	// compose file.
-	Service string `json:"service"`
+	// AppName is the name Dokploy deploys the application, database or
+	// compose stack under, or its Dokploy ID when the appName is unknown.
+	AppName string `json:"app_name"`
+	// ComposeService is the service name in the compose file for a service
+	// inside a compose stack; it is empty for applications and databases.
+	ComposeService string `json:"compose_service,omitempty"`
 }
 
 // Hostname returns the plain hostname for n, without collision handling;
 // use Assign to name several targets at once.
 func (n Names) Hostname() (string, error) {
-	return n.hostname("")
+	return n.hostname(false, "")
 }
 
-// hostname builds the hostname for n, appending suffix to the service label
-// when it is not empty. Labels are cut shorter when the full-length name
-// would exceed maxName.
-func (n Names) hostname(suffix string) (string, error) {
-	if n.Context == "" || n.Organization == "" || n.Project == "" || n.Service == "" {
+// hostname builds the hostname for n, with the context label when
+// withContext is set, and suffix appended to the first label when it is not
+// empty.
+func (n Names) hostname(withContext bool, suffix string) (string, error) {
+	if n.Context == "" || n.AppName == "" {
 		return "", fmt.Errorf("%w: %+v", ErrIncomplete, n)
 	}
-	for _, max := range []int{maxLabel, shortLabel} {
-		labels := []string{labelMax(n.Service, max)}
-		if suffix != "" {
-			labels[0] = withSuffix(labels[0], suffix, max)
-		}
-		if n.Compose != "" {
-			labels = append(labels, labelMax(n.Compose, max))
-		}
-		labels = append(labels, labelMax(n.Project, max), labelMax(n.Organization, max), labelMax(n.Context, max), TLD)
-		if host := strings.Join(labels, "."); len(host) <= maxName {
-			return host, nil
-		}
+	var labels []string
+	if n.ComposeService != "" {
+		labels = append(labels, Label(n.ComposeService))
 	}
-	// Unreachable: shortLabel guarantees the second attempt fits.
-	return "", fmt.Errorf("hostname for %+v exceeds %d bytes", n, maxName)
+	labels = append(labels, Label(n.AppName))
+	if withContext {
+		labels = append(labels, Label(n.Context))
+	}
+	if suffix != "" {
+		labels[0] = withSuffix(labels[0], suffix, maxLabel)
+	}
+	return strings.Join(append(labels, TLD), "."), nil
 }
 
-// Label turns a display name into a DNS label: lowercase ASCII letters,
+// Label turns a name, such as an appName or a compose service name, into a DNS label: lowercase ASCII letters,
 // digits and single hyphens, at most 63 bytes, with no leading or trailing
-// hyphen. Every other character, including dots, becomes a hyphen. A name
+// hyphen. Every other character, including the dots and underscores an\n// appName may hold, becomes a hyphen. A name
 // longer than 63 bytes is cut and ends in a hash of the whole name, so long
 // names that share a prefix stay distinct; a name with nothing usable, such
 // as one written only in non-Latin script, becomes "x-" and a hash of it.
 func Label(name string) string {
-	return labelMax(name, maxLabel)
-}
-
-func labelMax(name string, max int) string {
 	var b strings.Builder
 	hyphen := false
 	for _, r := range strings.ToLower(name) {
@@ -113,8 +116,8 @@ func labelMax(name string, max int) string {
 	if label == "" {
 		return "x-" + shortHash(name, labelHashLen)
 	}
-	if len(label) > max {
-		return withSuffix(label, shortHash(name, labelHashLen), max)
+	if len(label) > maxLabel {
+		return withSuffix(label, shortHash(name, labelHashLen), maxLabel)
 	}
 	return label
 }
@@ -161,12 +164,24 @@ func validLabel(l string) bool {
 	return true
 }
 
+// Reserved reports whether host is, or lies below, a name other software
+// resolves under .internal, such as host.docker.internal. Assign never
+// returns such a name.
+func Reserved(host string) bool {
+	for _, r := range reserved {
+		if host == r || strings.HasSuffix(host, "."+r) {
+			return true
+		}
+	}
+	return false
+}
+
 // Target is one service to name.
 type Target struct {
 	// ID identifies the target uniquely and stably, such as its registry
 	// key; it seeds the disambiguation suffix.
 	ID string
-	// Names are the display names the hostname is built from.
+	// Names are what the hostname is built from.
 	Names Names
 }
 
@@ -174,43 +189,51 @@ type Target struct {
 // two targets to the same hostname.
 //
 // Targets come in priority order, oldest registration first. Each target
-// gets its plain hostname unless an earlier target already claimed it; plain
-// names are claimed before any suffix is assigned, so a disambiguated name
-// never takes another target's plain name. A target that loses its plain
-// name gets "-" and the first 6 hex digits of the SHA-256 of its ID appended
-// to the service label, with more digits when that is taken too. The result
-// depends only on the targets and their order, and an existing hostname
-// stays unchanged when a newer target with the same name is added.
+// gets its plain hostname unless an earlier target already claimed it, or it
+// is Reserved. Plain names are claimed before any other form, so a
+// disambiguated name never takes another target's plain name. A target that
+// loses its plain name gets its context as an extra label before the TLD;
+// when that is taken too, "-" and the first 6 hex digits of the SHA-256 of
+// its ID are appended to its first label, with more digits while that is
+// taken. The result depends only on the targets and their order, and an
+// existing hostname stays unchanged when a newer target with the same name
+// is added.
 func Assign(targets []Target) (map[string]string, error) {
 	byID := make(map[string]string, len(targets))
 	owner := make(map[string]string, len(targets))
-	var losers []Target
 	for _, t := range targets {
 		if _, dup := byID[t.ID]; dup {
 			return nil, fmt.Errorf("duplicate hostname target ID %q", t.ID)
 		}
-		host, err := t.Names.Hostname()
-		if err != nil {
+		if _, err := t.Names.Hostname(); err != nil {
 			return nil, err
 		}
 		byID[t.ID] = ""
-		if _, taken := owner[host]; taken {
-			losers = append(losers, t)
-			continue
-		}
-		owner[host], byID[t.ID] = t.ID, host
 	}
-	for _, t := range losers {
-		for _, n := range suffixLens {
-			host, err := t.Names.hostname(shortHash(t.ID, n))
+	// Each round offers every still unnamed target, in order, one more
+	// candidate form: plain, then with the context, then with a suffix.
+	rounds := []func(Names, string) (string, error){
+		func(n Names, _ string) (string, error) { return n.hostname(false, "") },
+		func(n Names, _ string) (string, error) { return n.hostname(true, "") },
+	}
+	for _, l := range suffixLens {
+		rounds = append(rounds, func(n Names, id string) (string, error) { return n.hostname(true, shortHash(id, l)) })
+	}
+	for _, candidate := range rounds {
+		for _, t := range targets {
+			if byID[t.ID] != "" {
+				continue
+			}
+			host, err := candidate(t.Names, t.ID)
 			if err != nil {
 				return nil, err
 			}
-			if _, taken := owner[host]; !taken {
+			if _, taken := owner[host]; !taken && !Reserved(host) {
 				owner[host], byID[t.ID] = t.ID, host
-				break
 			}
 		}
+	}
+	for _, t := range targets {
 		if byID[t.ID] == "" {
 			return nil, fmt.Errorf("cannot find a unique hostname for target %q", t.ID)
 		}

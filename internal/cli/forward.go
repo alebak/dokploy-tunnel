@@ -30,6 +30,11 @@ import (
 // console is closed, so it stays below that.
 const shutdownTimeout = 3 * time.Second
 
+// hostsCleanupTimeout bounds how long forward spends removing its hostnames
+// from the hosts file on exit, including the time a password prompt waits
+// for an answer. It is a variable so tests can shorten it.
+var hostsCleanupTimeout = time.Minute
+
 // forwardJSON is the stable JSON form of "forward", printed once every
 // forward listens. It is the state file's content without its version.
 type forwardJSON struct {
@@ -65,7 +70,9 @@ func newForwardCommand() *Command {
 			"The hostnames are written to the hosts file as 'doktunnel hosts sync' does, elevating once only when " +
 			"something changed (with --no-input: elevation_required and the command to run). If any address " +
 			"cannot be listened on, nothing is forwarded. Runs in the foreground until Ctrl+C or SIGTERM, then " +
-			"closes every tunnel and exits 0. Human output: one `<hostname> (<ip>:<port>) → <service>` line per " +
+			"closes every tunnel, removes its hostnames from the hosts file unless another running forward uses " +
+			"them (elevating again when needed; with --no-input, or when elevation fails, it leaves them and warns " +
+			"to run 'doktunnel hosts clean'), and exits 0. Human output: one `<hostname> (<ip>:<port>) → <service>` line per " +
 			"forward on stdout, connection events on stderr. JSON output, printed once every forward listens: " +
 			"`{\"context\":\"<name>\",\"pid\":<pid>,\"started_at\":\"<RFC 3339>\",\"companion_url\":\"<URL>\",\"forwards\":[...]}`, " +
 			"where each forward has `target` (`type`, `id`, `name`), `hostname`, `ip` and `port`; nothing else is " +
@@ -104,8 +111,15 @@ type forwardTarget struct {
 	project, environment string
 	// ref addresses the service on the companion.
 	ref tunnel.TargetRef
-	// names are the hostname names, without context and organization.
+	// names are what the hostname is built from, without the context, and
+	// without the appName until withAppNames fills it in.
 	names hostname.Names
+}
+
+// dokployKey is the detailKey of the Dokploy service t belongs to: the
+// service itself, or the compose stack of a service inside one.
+func (t forwardTarget) dokployKey() string {
+	return string(t.ref.ServiceType) + "/" + t.ref.ServiceID
 }
 
 // label describes t in the picker and in messages.
@@ -127,8 +141,7 @@ func (c *catalog) targets() []forwardTarget {
 				if s.Type != dokploy.ServiceCompose {
 					out = append(out, forwardTarget{
 						typ: string(s.Type), id: s.ID, name: name, project: project, environment: env,
-						ref:   tunnel.TargetRef{ServiceType: s.Type, ServiceID: s.ID},
-						names: hostname.Names{Project: project, Service: name},
+						ref: tunnel.TargetRef{ServiceType: s.Type, ServiceID: s.ID},
 					})
 					continue
 				}
@@ -136,13 +149,60 @@ func (c *catalog) targets() []forwardTarget {
 					out = append(out, forwardTarget{
 						typ: typeComposeService, id: s.ID + "/" + svc, name: name + "/" + svc, project: project, environment: env,
 						ref:   tunnel.TargetRef{ServiceType: dokploy.ServiceCompose, ServiceID: s.ID, ComposeService: svc},
-						names: hostname.Names{Project: project, Compose: name, Service: svc},
+						names: hostname.Names{ComposeService: svc},
 					})
 				}
 			}
 		}
 	}
 	return out
+}
+
+// withAppNames returns targets with the appName of each one's Dokploy
+// service filled in, reading with at most detailConcurrency calls in flight
+// the details the catalog has not read yet. A service whose details cannot
+// be read is named after its Dokploy ID instead, with a warning. Only
+// cancellation of ctx is returned as an error.
+func (c *catalog) withAppNames(ctx context.Context, e *Env, targets []forwardTarget) ([]forwardTarget, error) {
+	var missing []forwardTarget
+	queued := map[string]bool{}
+	for _, t := range targets {
+		if k := t.dokployKey(); c.appNames[k] == "" && !queued[k] {
+			queued[k] = true
+			missing = append(missing, t)
+		}
+	}
+	failed := map[string]error{}
+	var mu sync.Mutex
+	err := forEachBounded(ctx, missing, func(t forwardTarget) {
+		details, err := c.details.Details(ctx, t.ref.ServiceType, t.ref.ServiceID)
+		mu.Lock()
+		defer mu.Unlock()
+		if err == nil && details.AppName == "" {
+			err = errors.New("the service details hold no appName")
+		}
+		if err != nil {
+			failed[t.dokployKey()] = err
+			return
+		}
+		if c.appNames == nil {
+			c.appNames = map[string]string{}
+		}
+		c.appNames[t.dokployKey()] = details.AppName
+	})
+	if err != nil {
+		return nil, err
+	}
+	for _, t := range missing {
+		if err := failed[t.dokployKey()]; err != nil {
+			e.warn(fmt.Sprintf("%s %s: appName unknown (%v); its hostname uses the Dokploy ID instead", t.ref.ServiceType, t.ref.ServiceID, err))
+		}
+	}
+	out := slices.Clone(targets)
+	for i := range out {
+		out[i].names.AppName = orID(c.appNames[out[i].dokployKey()], out[i].ref.ServiceID)
+	}
+	return out, nil
 }
 
 func orID(name, id string) string {
@@ -334,6 +394,9 @@ func runForward(env *Env, args []string, opts forwardOptions) error {
 		return clierr.Newf(clierr.InvalidArgument, "--port applies to a single service, and %d are selected", len(selected)).
 			WithHint("forward the services one at a time to pick a port for each")
 	}
+	if selected, err = cat.withAppNames(ctx, env, selected); err != nil {
+		return err
+	}
 
 	companionURL := cat.context.CompanionURL
 	if companionURL == "" {
@@ -351,16 +414,16 @@ func runForward(env *Env, args []string, opts forwardOptions) error {
 		}
 	}
 
-	planned, err := env.leaseAndSync(ctx, cat, selected, ports)
+	planned, err := env.leaseTargets(cat, selected, ports)
 	if err != nil {
 		return err
 	}
 	return env.serveForwards(cat.context.Name, companionURL, client, planned)
 }
 
-// leaseAndSync leases an address for every target, records its hostname
-// names, and syncs the hosts file and loopback aliases.
-func (e *Env) leaseAndSync(ctx context.Context, cat *catalog, targets []forwardTarget, ports [][]int) ([]plannedForward, error) {
+// leaseTargets leases an address for every target, records what its
+// hostname is built from, and plans one forward per target and port.
+func (e *Env) leaseTargets(cat *catalog, targets []forwardTarget, ports [][]int) ([]plannedForward, error) {
 	regPath, err := e.registryPath()
 	if err != nil {
 		return nil, err
@@ -369,7 +432,6 @@ func (e *Env) leaseAndSync(ctx context.Context, cat *catalog, targets []forwardT
 	if err != nil {
 		return nil, err
 	}
-	org := orID(cat.context.OrganizationName, cat.context.OrganizationID)
 	ips := make([]netip.Addr, len(targets))
 	for i, t := range targets {
 		k := registry.Key{Instance: cat.context.URL, OrganizationID: cat.context.OrganizationID, ServiceID: t.id}
@@ -377,34 +439,19 @@ func (e *Env) leaseAndSync(ctx context.Context, cat *catalog, targets []forwardT
 			return nil, leaseError(regPath, err)
 		}
 		names := t.names
-		names.Context, names.Organization = cat.context.Name, org
+		names.Context = cat.context.Name
 		if _, err := reg.SetNames(k, names); err != nil {
 			return nil, leaseError(regPath, err)
 		}
 	}
-
-	out, desired, err := e.syncHosts(ctx, false)
+	named, err := e.namedEntries()
 	if err != nil {
 		return nil, err
 	}
-	if out.Changed && !e.JSON {
-		fmt.Fprintf(e.Stderr, "Updated %s: %d added, %d removed.\n", out.HostsFile, len(out.Added), len(out.Removed))
+	byIP := make(map[netip.Addr]string, len(named))
+	for _, n := range named {
+		byIP[n.IP] = n.Hostname
 	}
-	byIP := make(map[netip.Addr]string, len(desired))
-	for _, d := range desired {
-		byIP[d.IP] = d.Hostname
-	}
-	// On macOS an address needs a lo0 alias before it can be listened on;
-	// the sync adds them, unless it skipped them for an overridden file.
-	missing, err := e.Loopback.Missing(ctx, ips)
-	if err != nil {
-		return nil, err
-	}
-	if len(missing) > 0 {
-		return nil, clierr.Newf(clierr.ElevationRequired, "lo0 has no alias for %s, so it cannot be listened on", missing[0]).
-			WithHint(fmt.Sprintf("run: sudo /sbin/ifconfig lo0 alias %s up", missing[0]))
-	}
-
 	var planned []plannedForward
 	for i, t := range targets {
 		for _, port := range ports[i] {
@@ -426,11 +473,65 @@ func leaseError(path string, err error) error {
 	return e
 }
 
-// serveForwards listens on every planned address, records the forwards
-// in the state directory, and serves until the stop signal.
+// serveForwards records the planned forwards in the state directory, syncs
+// the hosts file and loopback aliases, listens on every planned address,
+// and serves until the stop signal. On the way out it removes the
+// hostnames no other running forward uses (see removeOwnHosts).
 func (e *Env) serveForwards(contextName, companionURL string, client *forward.Client, planned []plannedForward) error {
 	stop, cancel := e.NotifyContext(context.Background())
 	defer cancel()
+
+	state := runstate.Process{
+		PID:          os.Getpid(),
+		StartedAt:    time.Now().UTC().Truncate(time.Second),
+		Context:      contextName,
+		CompanionURL: companionURL,
+	}
+	for _, p := range planned {
+		state.Forwards = append(state.Forwards, runstate.Forward{
+			Target:   runstate.Target{Type: p.target.typ, ID: p.target.id, Name: p.target.name},
+			Hostname: p.hostname, IP: p.ip, Port: p.port,
+		})
+	}
+	// The state file comes first: the sync writes the hostnames of running
+	// forwards only, this one included.
+	stateDir, err := e.forwardStateDir()
+	if err == nil {
+		_, err = runstate.Write(stateDir, state)
+	}
+	if err != nil {
+		return err
+	}
+	// Best effort: a file left behind belongs to a dead PID, which status
+	// and the sync recognize as stale.
+	defer func() { _ = runstate.Remove(stateDir, state.PID) }()
+
+	ctx := context.Background()
+	synced, err := e.syncHosts(ctx, syncOptions{})
+	if err != nil {
+		return err
+	}
+	if synced.Changed && !e.JSON {
+		fmt.Fprintf(e.Stderr, "Updated %s: %d added, %d removed.\n", synced.HostsFile, len(synced.Added), len(synced.Removed))
+	}
+	// Runs before cancel, so a Ctrl+C at a password prompt on the way out
+	// stops the prompt, not doktunnel.
+	defer e.removeOwnHosts(stateDir, state.PID)
+
+	// On macOS an address needs a lo0 alias before it can be listened on;
+	// the sync adds them, unless it skipped them for an overridden file.
+	ips := make([]netip.Addr, len(planned))
+	for i, p := range planned {
+		ips[i] = p.ip
+	}
+	missing, err := e.Loopback.Missing(ctx, ips)
+	if err != nil {
+		return err
+	}
+	if len(missing) > 0 {
+		return clierr.Newf(clierr.ElevationRequired, "lo0 has no alias for %s, so it cannot be listened on", missing[0]).
+			WithHint(fmt.Sprintf("run: sudo /sbin/ifconfig lo0 alias %s up", missing[0]))
+	}
 
 	events := &eventPrinter{env: e}
 	var fwds []*forward.Forwarder
@@ -455,31 +556,7 @@ func (e *Env) serveForwards(contextName, companionURL string, client *forward.Cl
 		fwds = append(fwds, f)
 	}
 
-	state := runstate.Process{
-		PID:          os.Getpid(),
-		StartedAt:    time.Now().UTC().Truncate(time.Second),
-		Context:      contextName,
-		CompanionURL: companionURL,
-	}
-	for _, p := range planned {
-		state.Forwards = append(state.Forwards, runstate.Forward{
-			Target:   runstate.Target{Type: p.target.typ, ID: p.target.id, Name: p.target.name},
-			Hostname: p.hostname, IP: p.ip, Port: p.port,
-		})
-	}
 	out := forwardJSON{Context: contextName, PID: state.PID, StartedAt: state.StartedAt, CompanionURL: companionURL, Forwards: state.Forwards}
-	stateDir, err := e.forwardStateDir()
-	if err == nil {
-		_, err = runstate.Write(stateDir, state)
-	}
-	if err != nil {
-		closeAll()
-		return err
-	}
-	// Best effort: a file left behind belongs to a dead PID, which status
-	// recognizes as stale.
-	defer func() { _ = runstate.Remove(stateDir, state.PID) }()
-
 	if err := writeForwards(e, out, planned); err != nil {
 		closeAll()
 		return err
@@ -505,6 +582,51 @@ func (e *Env) serveForwards(contextName, companionURL string, client *forward.Cl
 		e.warn("some tunnels did not close in time")
 	}
 	return nil
+}
+
+// removeOwnHosts removes this process's hostnames from the hosts file as it
+// stops: it removes its state file, then syncs the section to the forwards
+// still running, so a name another forward uses stays. It elevates as the
+// start did, but never fails or blocks the exit: when the change needs
+// administrator privileges and prompting is not allowed, the elevation
+// fails, or it all takes longer than hostsCleanupTimeout, the entries stay
+// and a warning says how to remove them. lo0 aliases always stay, and so do
+// the leases, so every service keeps its address.
+func (e *Env) removeOwnHosts(stateDir string, pid int) {
+	if err := runstate.Remove(stateDir, pid); err != nil {
+		e.warn(err.Error())
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), hostsCleanupTimeout)
+	defer cancel()
+	type result struct {
+		out hostsSyncJSON
+		err error
+	}
+	done := make(chan result, 1)
+	go func() {
+		out, err := e.syncHosts(ctx, syncOptions{exiting: true})
+		done <- result{out, err}
+	}()
+	var r result
+	select {
+	case r = <-done:
+	case <-ctx.Done():
+		// The elevators stop their prompt when ctx ends, so the sync
+		// returns at once; the grace only covers one that does not.
+		select {
+		case r = <-done:
+		case <-time.After(time.Second):
+			r.err = fmt.Errorf("gave up after %v", hostsCleanupTimeout)
+		}
+	}
+	if r.err != nil {
+		e.warn(fmt.Sprintf("the hostnames of this forward stay in the hosts file (%s); run 'doktunnel hosts sync' to "+
+			"remove them, or 'doktunnel hosts clean' to remove the whole doktunnel section", clierr.From(r.err).Message))
+		return
+	}
+	if r.out.Changed && !e.JSON {
+		fmt.Fprintf(e.Stderr, "Updated %s: %d added, %d removed.\n", r.out.HostsFile, len(r.out.Added), len(r.out.Removed))
+	}
 }
 
 // forwardStateDir is where forward processes record their forwards: next

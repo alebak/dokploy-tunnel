@@ -54,8 +54,13 @@ func newServicesHarness(t *testing.T) *contextHarness {
 	h.api.projects = servicesFixture()
 	// The owner key's project.all leaves out database names: pg_main is
 	// completed from postgres.one, and libsql.one fails for libsql_edge.
+	// Every service with details has an appName; maria_stg has no details,
+	// so forward names it after its ID.
 	h.api.details = map[string]dokploy.ServiceDetails{
-		"postgres/pg_main": {Service: dokploy.Service{ID: "pg_main", Type: dokploy.ServicePostgres, Name: "main-db", Status: "done"}},
+		"postgres/pg_main":    {Service: dokploy.Service{ID: "pg_main", Type: dokploy.ServicePostgres, Name: "main-db", Status: "done"}, AppName: "shop-maindb-a1b2c3"},
+		"application/app_web": {Service: dokploy.Service{ID: "app_web", Type: dokploy.ServiceApplication, Name: "web", Status: "done"}, AppName: "shop-web-d4e5f6"},
+		"redis/redis_cache":   {Service: dokploy.Service{ID: "redis_cache", Type: dokploy.ServiceRedis, Name: "cache", Status: "error"}, AppName: "shop-cache-g7h8i9"},
+		"compose/cmp_myapp":   {Service: dokploy.Service{ID: "cmp_myapp", Type: dokploy.ServiceCompose, Name: "myapp", Status: "done"}, AppName: "shop-myapp-x1y2z3"},
 	}
 	h.api.detailErrs = map[string]error{
 		"libsql/libsql_edge": fmt.Errorf("%w (HTTP 401 from libsql.one)", dokploy.ErrUnauthorized),
@@ -236,7 +241,7 @@ func manyDatabases(n int) []dokploy.Project {
 func TestFillServiceDetails_BoundsConcurrency(t *testing.T) {
 	d := &slowDetailer{}
 	projects := manyDatabases(3 * detailConcurrency)
-	warnings, err := fillServiceDetails(context.Background(), d, projects)
+	warnings, _, err := fillServiceDetails(context.Background(), d, projects)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -257,7 +262,7 @@ func TestFillServiceDetails_Canceled(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 	api := &fakeAPI{}
-	if _, err := fillServiceDetails(ctx, api, manyDatabases(10)); !errors.Is(err, context.Canceled) {
+	if _, _, err := fillServiceDetails(ctx, api, manyDatabases(10)); !errors.Is(err, context.Canceled) {
 		t.Errorf("err = %v, want context.Canceled", err)
 	}
 	if len(api.detailCalls) != 0 {

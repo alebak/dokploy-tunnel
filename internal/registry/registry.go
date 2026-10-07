@@ -35,8 +35,8 @@ type Lease struct {
 	Key       Key
 	IP        netip.Addr
 	CreatedAt time.Time
-	// Names are the display names last recorded with SetNames; they are
-	// zero until the lease is named.
+	// Names are what the lease's hostname is built from, last recorded
+	// with SetNames; they are zero until the lease is named.
 	Names hostname.Names
 }
 
@@ -174,9 +174,9 @@ func (r *Registry) Forget(k Key) (bool, error) {
 	return removed, err
 }
 
-// SetNames records the display names the hostname of k's lease is built
-// from and reports whether they changed. Names follow renames in Dokploy;
-// the address never does. It returns ErrNotLeased when k has no lease.
+// SetNames records what the hostname of k's lease is built from and
+// reports whether it changed. Names follow renames in Dokploy; the address
+// never does. It returns ErrNotLeased when k has no lease.
 func (r *Registry) SetNames(k Key, n hostname.Names) (bool, error) {
 	k, err := k.normalize()
 	if err != nil {

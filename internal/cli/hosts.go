@@ -17,6 +17,7 @@ import (
 	"github.com/alebak/dokploy-tunnel/internal/hosts"
 	"github.com/alebak/dokploy-tunnel/internal/output"
 	"github.com/alebak/dokploy-tunnel/internal/registry"
+	"github.com/alebak/dokploy-tunnel/internal/runstate"
 )
 
 // hostsFileEnv points the unprivileged hosts commands at another file. It
@@ -103,11 +104,15 @@ func newHostsSyncCommand() *Command {
 	var dryRun bool
 	return &Command{
 		Name:    "sync",
-		Summary: "Write the hostnames of registered services to the hosts file",
-		Description: "Computes the doktunnel section from the services registered in the address registry and " +
-			"writes it only when it differs from the current one; on macOS it also adds missing lo0 aliases. " +
-			"Hostnames are `<service>.<project>.<org>.<context>.internal`, or " +
-			"`<service>.<compose>.<project>.<org>.<context>.internal` for a service inside a compose stack. " +
+		Summary: "Write the hostnames of running forwards to the hosts file",
+		Description: "Computes the doktunnel section from the forwards running now, the hostnames of the services " +
+			"every running 'doktunnel forward' process listens for, and writes it only when it differs from the " +
+			"current one, so names of stopped forwards are removed and, with no forward running, the section is " +
+			"too; on macOS it also adds missing lo0 aliases. " +
+			"Hostnames are `<appName>.internal` for an application or database, and " +
+			"`<service>.<appName>.internal` for a service inside a compose stack, where appName is the name Dokploy " +
+			"deploys the service or stack under (its Dokploy ID when it cannot be read); a name an older lease " +
+			"already holds gets the context as an extra label, `<appName>.<context>.internal`. " +
 			"JSON output: `{\"hosts_file\":\"<path>\",\"dry_run\":<bool>,\"changed\":<bool>,\"added\":[...],\"removed\":[...],\"aliases\":[...]}`, " +
 			"where `added` and `removed` hold `{\"ip\",\"hostname\"}` entries and `aliases` the lo0 addresses added " +
 			"(or, with --dry-run, to add). `changed` is false when nothing had to change.",
@@ -194,8 +199,10 @@ func (e *Env) registryPath() (string, error) {
 	return p, nil
 }
 
-// desiredEntries computes the doktunnel section from the address registry.
-func (e *Env) desiredEntries() ([]hosts.Entry, error) {
+// namedEntries computes the hostname of every named lease in the address
+// registry. Hostnames are assigned over all of them, running or not, so a
+// service keeps its name whichever forwards run.
+func (e *Env) namedEntries() ([]hosts.Entry, error) {
 	path, err := e.registryPath()
 	if err != nil {
 		return nil, err
@@ -213,6 +220,41 @@ func (e *Env) desiredEntries() ([]hosts.Entry, error) {
 		return nil, e
 	}
 	return hosts.Desired(leases)
+}
+
+// liveEntries computes the doktunnel section: the entries of namedEntries
+// whose address a running forward process listens on, as its state file
+// records. A state file that cannot be read, such as one written by another
+// doktunnel version, keeps nothing.
+func (e *Env) liveEntries() ([]hosts.Entry, error) {
+	named, err := e.namedEntries()
+	if err != nil {
+		return nil, err
+	}
+	dir, err := e.forwardStateDir()
+	if err != nil {
+		return nil, err
+	}
+	procs, err := runstate.List(dir)
+	if err != nil {
+		return nil, clierr.New(clierr.Internal, err.Error())
+	}
+	live := map[netip.Addr]bool{}
+	for _, p := range procs {
+		if p.Err != nil || !e.ProcessAlive(p.PID) {
+			continue
+		}
+		for _, f := range p.Process.Forwards {
+			live[f.IP] = true
+		}
+	}
+	out := []hosts.Entry{}
+	for _, entry := range named {
+		if live[entry.IP] {
+			out = append(out, entry)
+		}
+	}
+	return out, nil
 }
 
 // readHosts reads and parses the hosts file at path.
@@ -237,7 +279,7 @@ func malformedError(path string, err error) error {
 }
 
 func runHostsSync(env *Env, dryRun bool) error {
-	out, _, err := env.syncHosts(context.Background(), dryRun)
+	out, err := env.syncHosts(context.Background(), syncOptions{dryRun: dryRun})
 	if err != nil {
 		return err
 	}
@@ -247,32 +289,42 @@ func runHostsSync(env *Env, dryRun bool) error {
 	return writeSync(env, out)
 }
 
+// syncOptions tune syncHosts.
+type syncOptions struct {
+	// dryRun changes nothing.
+	dryRun bool
+	// exiting is set when a forward process removes its own hostnames as
+	// it stops: lo0 aliases are left alone, and when prompting is not
+	// allowed the sync fails without leaving a pending entries file.
+	exiting bool
+}
+
 // syncHosts brings the doktunnel section of the hosts file, and on macOS the
-// lo0 aliases, in line with the address registry, elevating once and only
-// when something has to change; with dryRun it changes nothing. It returns
-// what changed and the entries the section must hold.
-func (e *Env) syncHosts(ctx context.Context, dryRun bool) (hostsSyncJSON, []hosts.Entry, error) {
+// lo0 aliases, in line with the running forwards (see liveEntries),
+// elevating once and only when something has to change. It returns what
+// changed.
+func (e *Env) syncHosts(ctx context.Context, opts syncOptions) (hostsSyncJSON, error) {
 	target := e.hostsTarget()
-	desired, err := e.desiredEntries()
+	desired, err := e.liveEntries()
 	if err != nil {
-		return hostsSyncJSON{}, nil, err
+		return hostsSyncJSON{}, err
 	}
 	content, f, current, err := readHosts(target.path)
 	if err != nil {
-		return hostsSyncJSON{}, nil, err
+		return hostsSyncJSON{}, err
 	}
 	next := f.WithEntries(desired)
 	hostsChanged := !bytes.Equal(next, content)
 
 	var missing []netip.Addr
-	if !target.override {
+	if !target.override && !opts.exiting {
 		if missing, err = e.Loopback.Missing(ctx, entryIPs(desired)); err != nil {
-			return hostsSyncJSON{}, nil, err
+			return hostsSyncJSON{}, err
 		}
 	}
 	out := hostsSyncJSON{
 		HostsFile: target.path,
-		DryRun:    dryRun,
+		DryRun:    opts.dryRun,
 		Changed:   hostsChanged || len(missing) > 0,
 		Added:     subtract(desired, current),
 		Removed:   subtract(current, desired),
@@ -282,17 +334,17 @@ func (e *Env) syncHosts(ctx context.Context, dryRun bool) (hostsSyncJSON, []host
 		out.Aliases = append(out.Aliases, ip.String())
 	}
 
-	if !dryRun && out.Changed {
-		if err := e.applySync(ctx, target, next, desired, hostsChanged, len(missing) > 0); err != nil {
-			return hostsSyncJSON{}, nil, err
+	if !opts.dryRun && out.Changed {
+		if err := e.applySync(ctx, opts, target, next, desired, hostsChanged, len(missing) > 0); err != nil {
+			return hostsSyncJSON{}, err
 		}
 	}
-	return out, desired, nil
+	return out, nil
 }
 
 // applySync writes next to the hosts file directly when the user may, and
 // otherwise runs the privileged helper, which also adds missing aliases.
-func (e *Env) applySync(ctx context.Context, target hostsTarget, next []byte, desired []hosts.Entry, hostsChanged, aliases bool) error {
+func (e *Env) applySync(ctx context.Context, opts syncOptions, target hostsTarget, next []byte, desired []hosts.Entry, hostsChanged, aliases bool) error {
 	if hostsChanged {
 		err := e.WriteHosts(target.path, next)
 		switch {
@@ -312,6 +364,9 @@ func (e *Env) applySync(ctx context.Context, target hostsTarget, next []byte, de
 	what := "updating " + target.path
 	if !hostsChanged {
 		what = "adding lo0 aliases"
+	}
+	if opts.exiting && e.NoInput {
+		return clierr.Newf(clierr.ElevationRequired, "%s needs administrator privileges, and prompting is not allowed", what)
 	}
 	if err := e.runPrivilegedEntries(ctx, what, hosts.FormatEntries(desired)); err != nil {
 		return err

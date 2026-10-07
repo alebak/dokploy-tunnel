@@ -244,7 +244,7 @@ func TestSetNames_PersistsAndReportsChanges(t *testing.T) {
 	r, path := newTestRegistry(t)
 	k := testKey("pg")
 	ip := mustLease(t, r, k)
-	names := hostname.Names{Context: "prod", Organization: "Acme", Project: "shop", Compose: "myapp", Service: "postgres"}
+	names := hostname.Names{Context: "prod", AppName: "acme-billing-x1y2z3", ComposeService: "postgres"}
 
 	changed, err := r.SetNames(k, names)
 	if err != nil || !changed {
@@ -267,7 +267,7 @@ func TestSetNames_PersistsAndReportsChanges(t *testing.T) {
 	}
 
 	renamed := names
-	renamed.Service = "primary"
+	renamed.AppName = "acme-billing-renamed"
 	if changed, err := reopened.SetNames(k, renamed); err != nil || !changed {
 		t.Fatalf("SetNames after a rename = %v, %v; want true, nil", changed, err)
 	}
@@ -276,9 +276,46 @@ func TestSetNames_PersistsAndReportsChanges(t *testing.T) {
 	}
 }
 
+func TestSetNames_ReplacesNamesOfAnOlderVersion(t *testing.T) {
+	r, path := newTestRegistry(t)
+	// An older doktunnel recorded display names; they leave only the
+	// context, and the lease keeps its address when it is named again.
+	old := `{"version":1,"leases":[{"instance":"https://dokploy.example.com","organization_id":"org-1","service_id":"pg",` +
+		`"ip":"127.77.0.7","created_at":"2026-01-01T00:00:00Z",` +
+		`"names":{"context":"prod","organization":"Acme","project":"shop","service":"main-db"}}]}`
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte(old), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	leases, err := r.List()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(leases) != 1 || leases[0].Names != (hostname.Names{Context: "prod"}) {
+		t.Fatalf("List = %+v, want one lease named only by its context", leases)
+	}
+	names := hostname.Names{Context: "prod", AppName: "acme-postgres-a1b2c3"}
+	if changed, err := r.SetNames(testKey("pg"), names); err != nil || !changed {
+		t.Fatalf("SetNames = %v, %v; want true, nil", changed, err)
+	}
+	ip, ok, err := r.Lookup(testKey("pg"))
+	if err != nil || !ok || ip != netip.MustParseAddr("127.77.0.7") {
+		t.Errorf("Lookup = %v, %v, %v; want the old address", ip, ok, err)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(data), "main-db") {
+		t.Errorf("registry file still holds the old display names: %s", data)
+	}
+}
+
 func TestSetNames_WithoutLease(t *testing.T) {
 	r, _ := newTestRegistry(t)
-	_, err := r.SetNames(testKey("none"), hostname.Names{Service: "x"})
+	_, err := r.SetNames(testKey("none"), hostname.Names{AppName: "x"})
 	if !errors.Is(err, ErrNotLeased) {
 		t.Fatalf("SetNames error = %v, want ErrNotLeased", err)
 	}

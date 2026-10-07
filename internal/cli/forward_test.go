@@ -24,6 +24,7 @@ import (
 
 	"github.com/alebak/dokploy-tunnel/internal/clierr"
 	"github.com/alebak/dokploy-tunnel/internal/dokploy"
+	"github.com/alebak/dokploy-tunnel/internal/hostname"
 	"github.com/alebak/dokploy-tunnel/internal/hosts"
 	"github.com/alebak/dokploy-tunnel/internal/registry"
 	"github.com/alebak/dokploy-tunnel/internal/runstate"
@@ -161,6 +162,8 @@ type forwardHarness struct {
 	order   []string
 	// busy are requested addresses whose listen fails, as if taken.
 	busy map[string]bool
+	// writes are the hosts file contents written without elevation.
+	writes []string
 }
 
 func newForwardHarness(t *testing.T) *forwardHarness {
@@ -232,8 +235,12 @@ func (h *forwardHarness) app(stdin string, terminal bool, stdout, stderr io.Writ
 			if h.hosts.denyWrite {
 				return &fs.PathError{Op: "open", Path: path, Err: fs.ErrPermission}
 			}
+			h.mu.Lock()
+			h.writes = append(h.writes, string(data))
+			h.mu.Unlock()
 			return hosts.Write(path, data)
 		},
+		ProcessAlive: func(pid int) bool { return pid == os.Getpid() || h.hosts.alive[pid] },
 		NotifyContext: func(parent context.Context) (context.Context, context.CancelFunc) {
 			ctx, cancel := context.WithCancel(parent)
 			stop := context.AfterFunc(h.stop, cancel)
@@ -292,53 +299,53 @@ func TestForward_SelectsTargetsAndResolvesPorts(t *testing.T) {
 		{
 			name: "database by name uses its default port",
 			args: []string{"main-db"},
-			want: []string{"pg_main@127.77.0.1:5432=main-db.shop.acme.prod.internal"},
+			want: []string{"pg_main@127.77.0.1:5432=shop-maindb-a1b2c3.internal"},
 		},
 		{
 			name: "database by ID",
 			args: []string{"pg_main"},
-			want: []string{"pg_main@127.77.0.1:5432=main-db.shop.acme.prod.internal"},
+			want: []string{"pg_main@127.77.0.1:5432=shop-maindb-a1b2c3.internal"},
 		},
 		{
 			name:       "compose service by name asks the companion",
 			args:       []string{"myapp/postgres"},
-			want:       []string{"cmp_myapp/postgres@127.77.0.1:5432=postgres.myapp.shop.acme.prod.internal"},
+			want:       []string{"cmp_myapp/postgres@127.77.0.1:5432=postgres.shop-myapp-x1y2z3.internal"},
 			portsCalls: []string{"cmp_myapp/postgres"},
 		},
 		{
 			name:       "compose service by ID",
 			args:       []string{"cmp_myapp/postgres"},
-			want:       []string{"cmp_myapp/postgres@127.77.0.1:5432=postgres.myapp.shop.acme.prod.internal"},
+			want:       []string{"cmp_myapp/postgres@127.77.0.1:5432=postgres.shop-myapp-x1y2z3.internal"},
 			portsCalls: []string{"cmp_myapp/postgres"},
 		},
 		{
 			name: "several services, a repeated one once",
 			args: []string{"main-db", "cache", "pg_main"},
 			want: []string{
-				"pg_main@127.77.0.1:5432=main-db.shop.acme.prod.internal",
-				"redis_cache@127.77.0.2:6379=cache.shop.acme.prod.internal",
+				"pg_main@127.77.0.1:5432=shop-maindb-a1b2c3.internal",
+				"redis_cache@127.77.0.2:6379=shop-cache-g7h8i9.internal",
 			},
 		},
 		{
 			name:       "--all-ports forwards every exposed port",
 			args:       []string{"myapp/pgadmin", "--all-ports"},
-			want:       []string{"cmp_myapp/pgadmin@127.77.0.1:80=pgadmin.myapp.shop.acme.prod.internal", "cmp_myapp/pgadmin@127.77.0.1:443=pgadmin.myapp.shop.acme.prod.internal"},
+			want:       []string{"cmp_myapp/pgadmin@127.77.0.1:80=pgadmin.shop-myapp-x1y2z3.internal", "cmp_myapp/pgadmin@127.77.0.1:443=pgadmin.shop-myapp-x1y2z3.internal"},
 			portsCalls: []string{"cmp_myapp/pgadmin"},
 		},
 		{
 			name: "--port wins over the companion",
 			args: []string{"myapp/pgadmin", "--port", "8080"},
-			want: []string{"cmp_myapp/pgadmin@127.77.0.1:8080=pgadmin.myapp.shop.acme.prod.internal"},
+			want: []string{"cmp_myapp/pgadmin@127.77.0.1:8080=pgadmin.shop-myapp-x1y2z3.internal"},
 		},
 		{
 			name: "--port wins over a database default",
 			args: []string{"--port", "6543", "main-db"},
-			want: []string{"pg_main@127.77.0.1:6543=main-db.shop.acme.prod.internal"},
+			want: []string{"pg_main@127.77.0.1:6543=shop-maindb-a1b2c3.internal"},
 		},
 		{
 			name: "a service whose name is unknown is named by its ID",
 			args: []string{"libsql_edge"},
-			want: []string{"libsql_edge@127.77.0.1:8080=libsql-edge.shop.acme.prod.internal"},
+			want: []string{"libsql_edge@127.77.0.1:8080=libsql-edge.internal"},
 		},
 	}
 	for _, tt := range tests {
@@ -388,9 +395,9 @@ func TestForward_AllForwardsEveryTargetInScope(t *testing.T) {
 	// The compose stack itself is not forwardable, and cmp_stack has no
 	// readable services.
 	want := []string{
-		"app_web@127.77.0.1:3000=web.shop.acme.prod.internal",
-		"pg_main@127.77.0.2:5432=main-db.shop.acme.prod.internal",
-		"redis_cache@127.77.0.3:6379=cache.shop.acme.prod.internal",
+		"app_web@127.77.0.1:3000=shop-web-d4e5f6.internal",
+		"pg_main@127.77.0.2:5432=shop-maindb-a1b2c3.internal",
+		"redis_cache@127.77.0.3:6379=shop-cache-g7h8i9.internal",
 	}
 	if !slices.Equal(got, want) {
 		t.Errorf("forwards = %q, want %q", got, want)
@@ -480,8 +487,8 @@ func TestForward_InteractivePicker(t *testing.T) {
 	}
 	got := decodeJSON[forwardOut](t, r.stdout).summary()
 	want := []string{
-		"pg_main@127.77.0.1:5432=main-db.shop.acme.prod.internal",
-		"cmp_myapp/postgres@127.77.0.2:5432=postgres.myapp.shop.acme.prod.internal",
+		"pg_main@127.77.0.1:5432=shop-maindb-a1b2c3.internal",
+		"cmp_myapp/postgres@127.77.0.2:5432=postgres.shop-myapp-x1y2z3.internal",
 	}
 	if !slices.Equal(got, want) {
 		t.Errorf("forwards = %q, want %q", got, want)
@@ -490,16 +497,16 @@ func TestForward_InteractivePicker(t *testing.T) {
 
 func TestForward_SyncsHostsFile(t *testing.T) {
 	const block = hosts.BeginLine + "\r\n" +
-		"127.77.0.1\tmain-db.shop.acme.prod.internal\r\n" +
+		"127.77.0.1\tshop-maindb-a1b2c3.internal\r\n" +
 		hosts.EndLine + "\r\n"
 
-	t.Run("writes the entry and names the lease", func(t *testing.T) {
+	t.Run("writes the entry, names the lease and removes the entry on exit", func(t *testing.T) {
 		h := newForwardHarness(t)
 		if r := h.forward("", false, "main-db", "--json"); r.exit != 0 {
 			t.Fatalf("exit = %d (stdout %q)", r.exit, r.stdout)
 		}
-		if got := h.hosts.readHosts(); got != fixtureHosts+block {
-			t.Errorf("hosts file =\n%q\nwant\n%q", got, fixtureHosts+block)
+		if want := []string{fixtureHosts + block, fixtureHosts}; !slices.Equal(h.writes, want) {
+			t.Errorf("hosts file writes =\n%q\nwant\n%q", h.writes, want)
 		}
 		if len(h.hosts.elevator.calls) != 0 {
 			t.Errorf("elevated %d times, want none for a writable hosts file", len(h.hosts.elevator.calls))
@@ -516,7 +523,7 @@ func TestForward_SyncsHostsFile(t *testing.T) {
 		if k.Instance != "https://panel.example.com" || k.OrganizationID != "org1" || k.ServiceID != "pg_main" {
 			t.Errorf("lease key = %+v, want the panel, org1 and pg_main", k)
 		}
-		if n := leases[0].Names; n.Context != "prod" || n.Organization != "Acme" || n.Project != "shop" || n.Service != "main-db" || n.Compose != "" {
+		if n := leases[0].Names; n != (hostname.Names{Context: "prod", AppName: "shop-maindb-a1b2c3"}) {
 			t.Errorf("lease names = %+v", n)
 		}
 	})
@@ -528,22 +535,18 @@ func TestForward_SyncsHostsFile(t *testing.T) {
 		if r.exit != 0 {
 			t.Fatalf("exit = %d (stderr %q)", r.exit, r.stderr)
 		}
-		if len(h.hosts.elevator.calls) != 1 {
-			t.Fatalf("elevated %d times, want once", len(h.hosts.elevator.calls))
+		// Once to add the entry, once on exit to remove it.
+		if len(h.hosts.elevator.calls) != 2 {
+			t.Fatalf("elevated %d times, want twice", len(h.hosts.elevator.calls))
 		}
-		if got := h.hosts.readHosts(); got != fixtureHosts+block {
-			t.Errorf("hosts file =\n%q\nwant\n%q", got, fixtureHosts+block)
+		if want := []string{fixtureEntries1, ""}; !slices.Equal(h.hosts.elevator.stdins, want) {
+			t.Errorf("helper stdins = %q, want %q", h.hosts.elevator.stdins, want)
+		}
+		if got := h.hosts.readHosts(); got != fixtureHosts {
+			t.Errorf("hosts file =\n%q\nwant\n%q", got, fixtureHosts)
 		}
 		if !strings.Contains(r.stderr, "needs administrator privileges") {
 			t.Errorf("stderr %q does not explain the elevation", r.stderr)
-		}
-
-		// Nothing changed the second time, so nothing is elevated.
-		if r := h.forward("", true, "main-db"); r.exit != 0 {
-			t.Fatalf("second run: exit = %d (stderr %q)", r.exit, r.stderr)
-		}
-		if len(h.hosts.elevator.calls) != 1 {
-			t.Errorf("elevated %d times in all, want still once", len(h.hosts.elevator.calls))
 		}
 	})
 
@@ -580,14 +583,113 @@ func TestForward_SyncsHostsFile(t *testing.T) {
 	})
 }
 
+// fixtureEntries1 is what the privileged helper receives to add main-db.
+const fixtureEntries1 = "127.77.0.1\tshop-maindb-a1b2c3.internal\n"
+
+func TestForward_ExitKeepsNamesOfOtherRunningForwards(t *testing.T) {
+	h := newForwardHarness(t)
+	// Another forward process runs cache, and once ran main-db too.
+	cache := h.hosts.lease("redis_cache", hostname.Names{Context: "prod", AppName: "shop-cache-g7h8i9"})
+	main := h.hosts.lease("pg_main", hostname.Names{Context: "prod", AppName: "shop-maindb-a1b2c3"})
+	h.hosts.liveForward(77, cache)
+	h.hosts.writeHosts(fixtureHosts + hosts.BeginLine + "\r\n127.77.0.1\tshop-cache-g7h8i9.internal\r\n" + hosts.EndLine + "\r\n")
+
+	if r := h.forward("", false, "main-db", "cache", "--json"); r.exit != 0 {
+		t.Fatalf("exit = %d (stdout %q)", r.exit, r.stdout)
+	}
+	if main != netip.MustParseAddr("127.77.0.2") {
+		t.Fatalf("main-db leased %v", main)
+	}
+	both := fixtureHosts + hosts.BeginLine + "\r\n127.77.0.1\tshop-cache-g7h8i9.internal\r\n127.77.0.2\tshop-maindb-a1b2c3.internal\r\n" + hosts.EndLine + "\r\n"
+	onlyCache := fixtureHosts + hosts.BeginLine + "\r\n127.77.0.1\tshop-cache-g7h8i9.internal\r\n" + hosts.EndLine + "\r\n"
+	if want := []string{both, onlyCache}; !slices.Equal(h.writes, want) {
+		t.Errorf("hosts file writes =\n%q\nwant\n%q", h.writes, want)
+	}
+	if _, err := os.Stat(runstate.Path(h.stateDir(), os.Getpid())); !os.IsNotExist(err) {
+		t.Errorf("state file still exists after exit: %v", err)
+	}
+}
+
+func TestForward_ExitWithoutElevationLeavesEntries(t *testing.T) {
+	block := fixtureHosts + hosts.BeginLine + "\r\n127.77.0.1\tshop-maindb-a1b2c3.internal\r\n" + hosts.EndLine + "\r\n"
+	tests := []struct {
+		name     string
+		terminal bool
+		args     []string
+		setup    func(h *forwardHarness)
+		calls    int
+	}{
+		{name: "--no-input", terminal: true, args: []string{"--no-input"}},
+		{name: "no terminal", terminal: false},
+		{name: "elevation refused", terminal: true, setup: func(h *forwardHarness) { h.hosts.elevator.fail = true }, calls: 1},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			h := newForwardHarness(t)
+			// The section already holds main-db, so starting needs no
+			// privileges, but removing it on exit does.
+			h.hosts.lease("pg_main", hostname.Names{Context: "prod", AppName: "shop-maindb-a1b2c3"})
+			h.hosts.writeHosts(block)
+			h.hosts.denyWrite = true
+			if tt.setup != nil {
+				tt.setup(h)
+			}
+			r := h.forward("", tt.terminal, append([]string{"main-db"}, tt.args...)...)
+			if r.exit != 0 {
+				t.Fatalf("exit = %d, want 0 (stdout %q, stderr %q)", r.exit, r.stdout, r.stderr)
+			}
+			if got := h.hosts.readHosts(); got != block {
+				t.Errorf("hosts file =\n%q\nwant the entry left in place", got)
+			}
+			if len(h.hosts.elevator.calls) != tt.calls {
+				t.Errorf("elevated %d times, want %d", len(h.hosts.elevator.calls), tt.calls)
+			}
+			if !strings.Contains(r.stderr, "warning: ") || !strings.Contains(r.stderr, "doktunnel hosts clean") {
+				t.Errorf("stderr = %q, want a warning naming doktunnel hosts clean", r.stderr)
+			}
+			if _, err := os.Stat(h.hosts.pendingPath()); !os.IsNotExist(err) {
+				t.Errorf("exit left a pending entries file: %v", err)
+			}
+		})
+	}
+}
+
+func TestForward_ExitCleanupIsBounded(t *testing.T) {
+	defer func(d time.Duration) { hostsCleanupTimeout = d }(hostsCleanupTimeout)
+	hostsCleanupTimeout = 50 * time.Millisecond
+
+	h := newForwardHarness(t)
+	h.hosts.lease("pg_main", hostname.Names{Context: "prod", AppName: "shop-maindb-a1b2c3"})
+	block := fixtureHosts + hosts.BeginLine + "\r\n127.77.0.1\tshop-maindb-a1b2c3.internal\r\n" + hosts.EndLine + "\r\n"
+	h.hosts.writeHosts(block)
+	h.hosts.denyWrite = true
+	// Nobody answers the password prompt on exit.
+	h.hosts.elevator.block = true
+
+	start := time.Now()
+	r := h.forward("", true, "main-db")
+	if r.exit != 0 {
+		t.Fatalf("exit = %d (stderr %q)", r.exit, r.stderr)
+	}
+	if took := time.Since(start); took > forwardWait/2 {
+		t.Errorf("forward took %v to exit, want it bounded by the cleanup timeout", took)
+	}
+	if got := h.hosts.readHosts(); got != block {
+		t.Errorf("hosts file =\n%q\nwant the entry left in place", got)
+	}
+	if !strings.Contains(r.stderr, "doktunnel hosts clean") {
+		t.Errorf("stderr = %q, want a warning naming doktunnel hosts clean", r.stderr)
+	}
+}
+
 func TestForward_HumanOutput(t *testing.T) {
 	h := newForwardHarness(t)
 	r := h.forward("", false, "myapp/postgres", "main-db")
 	if r.exit != 0 {
 		t.Fatalf("exit = %d (stderr %q)", r.exit, r.stderr)
 	}
-	want := "postgres.myapp.shop.acme.prod.internal (127.77.0.1:5432) → myapp/postgres\n" +
-		"main-db.shop.acme.prod.internal (127.77.0.2:5432) → main-db\n"
+	want := "postgres.shop-myapp-x1y2z3.internal (127.77.0.1:5432) → myapp/postgres\n" +
+		"shop-maindb-a1b2c3.internal (127.77.0.2:5432) → main-db\n"
 	if r.stdout != want {
 		t.Errorf("stdout =\n%s\nwant\n%s", r.stdout, want)
 	}
@@ -619,7 +721,7 @@ func TestForward_EndToEnd(t *testing.T) {
 		time.Sleep(5 * time.Millisecond)
 	}
 	out := decodeJSON[forwardOut](t, stdout.String())
-	if got := out.summary(); len(got) != 1 || got[0] != "cmp_myapp/postgres@127.77.0.1:5432=postgres.myapp.shop.acme.prod.internal" {
+	if got := out.summary(); len(got) != 1 || got[0] != "cmp_myapp/postgres@127.77.0.1:5432=postgres.shop-myapp-x1y2z3.internal" {
 		t.Fatalf("forwards = %q", got)
 	}
 
@@ -629,10 +731,16 @@ func TestForward_EndToEnd(t *testing.T) {
 		t.Fatalf("reading the state file: %v", err)
 	}
 	if state.Context != "prod" || state.CompanionURL != h.companion.url() || len(state.Forwards) != 1 ||
-		state.Forwards[0].Hostname != "postgres.myapp.shop.acme.prod.internal" || state.Forwards[0].Port != 5432 ||
+		state.Forwards[0].Hostname != "postgres.shop-myapp-x1y2z3.internal" || state.Forwards[0].Port != 5432 ||
 		state.Forwards[0].IP != netip.MustParseAddr("127.77.0.1") ||
 		state.Forwards[0].Target != (runstate.Target{Type: "compose_service", ID: "cmp_myapp/postgres", Name: "myapp/postgres"}) {
 		t.Errorf("state = %+v", state)
+	}
+
+	// While it runs, the hosts file holds its hostname.
+	running := fixtureHosts + hosts.BeginLine + "\r\n127.77.0.1\tpostgres.shop-myapp-x1y2z3.internal\r\n" + hosts.EndLine + "\r\n"
+	if got := h.hosts.readHosts(); got != running {
+		t.Errorf("hosts file while forwarding =\n%q\nwant\n%q", got, running)
 	}
 
 	h.mu.Lock()
@@ -687,6 +795,9 @@ func TestForward_EndToEnd(t *testing.T) {
 	if _, err := os.Stat(runstate.Path(h.stateDir(), os.Getpid())); !os.IsNotExist(err) {
 		t.Errorf("state file still exists after shutdown: %v", err)
 	}
+	if got := h.hosts.readHosts(); got != fixtureHosts {
+		t.Errorf("hosts file after shutdown =\n%q\nwant its hostname removed", got)
+	}
 	if strings.Count(stdout.String(), "\n") != 1 {
 		t.Errorf("stdout = %q, want only the JSON result", stdout.String())
 	}
@@ -718,5 +829,66 @@ func TestForward_BindFailureForwardsNothing(t *testing.T) {
 	}
 	if entries, _ := runstate.List(h.stateDir()); len(entries) != 0 {
 		t.Errorf("state files = %+v, want none", entries)
+	}
+}
+
+func TestForward_UnknownAppNameFallsBackToTheID(t *testing.T) {
+	h := newForwardHarness(t)
+	r := h.forward("", false, "libsql_edge")
+	if r.exit != 0 {
+		t.Fatalf("exit = %d (stderr %q)", r.exit, r.stderr)
+	}
+	if !strings.HasPrefix(r.stdout, "libsql-edge.internal (127.77.0.1:8080) → libsql_edge\n") {
+		t.Errorf("stdout = %q, want the hostname built from the ID", r.stdout)
+	}
+	if !strings.Contains(r.stderr, "warning: libsql libsql_edge: appName unknown") {
+		t.Errorf("stderr = %q, want a warning about the unknown appName", r.stderr)
+	}
+}
+
+func TestForward_ReadsEachAppNameOnce(t *testing.T) {
+	h := newForwardHarness(t)
+	h.companion.ports["cmp_myapp/pgadmin"] = []int{80}
+	if r := h.forward("", false, "myapp/postgres", "myapp/pgadmin", "main-db", "--json"); r.exit != 0 {
+		t.Fatalf("exit = %d (stdout %q)", r.exit, r.stdout)
+	}
+	// pg_main was read while listing services; the stack once for both
+	// of its services.
+	want := map[string]int{"postgres/pg_main": 1, "libsql/libsql_edge": 1, "compose/cmp_myapp": 1}
+	got := map[string]int{}
+	for _, c := range h.api.detailCalls {
+		got[c]++
+	}
+	if fmt.Sprint(got) != fmt.Sprint(want) {
+		t.Errorf("detail calls = %v, want %v", got, want)
+	}
+}
+
+func TestForward_MigratesNamesOfAnOlderVersion(t *testing.T) {
+	h := newForwardHarness(t)
+	// An older doktunnel leased main-db 127.77.0.7 under its display names
+	// and wrote that name to the hosts file.
+	old := `{"version":1,"leases":[{"instance":"https://panel.example.com","organization_id":"org1","service_id":"pg_main",` +
+		`"ip":"127.77.0.7","created_at":"2026-01-01T00:00:00Z",` +
+		`"names":{"context":"prod","organization":"Acme","project":"shop","service":"main-db"}}]}`
+	if err := os.MkdirAll(filepath.Dir(h.hosts.registryPath), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(h.hosts.registryPath, []byte(old), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	h.hosts.writeHosts(fixtureHosts + hosts.BeginLine + "\r\n127.77.0.7\tmain-db.shop.acme.prod.internal\r\n" + hosts.EndLine + "\r\n")
+
+	r := h.forward("", false, "main-db", "--json")
+	if r.exit != 0 {
+		t.Fatalf("exit = %d (stdout %q)", r.exit, r.stdout)
+	}
+	if got := decodeJSON[forwardOut](t, r.stdout).summary(); !slices.Equal(got, []string{"pg_main@127.77.0.7:5432=shop-maindb-a1b2c3.internal"}) {
+		t.Errorf("forwards = %q, want the old address under the new name", got)
+	}
+	// One sync replaced the old name.
+	want := fixtureHosts + hosts.BeginLine + "\r\n127.77.0.7\tshop-maindb-a1b2c3.internal\r\n" + hosts.EndLine + "\r\n"
+	if len(h.writes) == 0 || h.writes[0] != want {
+		t.Errorf("hosts file writes =\n%q\nwant first\n%q", h.writes, want)
 	}
 }

@@ -140,6 +140,11 @@ type catalog struct {
 	inside map[string][]string
 	// warnings explain what could not be read, keyed by detailKey.
 	warnings map[string]string
+	// appNames holds the appName of every service whose details were
+	// read, keyed by detailKey.
+	appNames map[string]string
+	// details reads the details of services whose appName is not known.
+	details dokploy.Detailer
 }
 
 // loadCatalog reads the catalog of the resolved context, keeping only the
@@ -166,7 +171,7 @@ func (e *Env) loadCatalog(ctx context.Context, project string) (*catalog, error)
 		}
 	}
 
-	warnings, err := fillServiceDetails(ctx, api, projects)
+	warnings, appNames, err := fillServiceDetails(ctx, api, projects)
 	if err != nil {
 		return nil, fmt.Errorf("reading service details: %w", err)
 	}
@@ -180,7 +185,10 @@ func (e *Env) loadCatalog(ctx context.Context, project string) (*catalog, error)
 		}
 		warnings[k] = w
 	}
-	return &catalog{context: cctx, key: key, base: base, projects: projects, inside: inside, warnings: warnings}, nil
+	return &catalog{
+		context: cctx, key: key, base: base, projects: projects, inside: inside, warnings: warnings,
+		appNames: appNames, details: api,
+	}, nil
 }
 
 // filterProjects returns the projects whose ID or name is nameOrID. Dokploy
@@ -197,10 +205,11 @@ func filterProjects(projects []dokploy.Project, nameOrID string) []dokploy.Proje
 
 // fillServiceDetails completes, in place, the services that project.all
 // lists without a name or status, by reading each one's details with at most
-// detailConcurrency calls in flight. A failed call does not fail the list:
-// the service keeps its ID and gets a warning, keyed by detailKey. Only
-// cancellation of ctx is returned as an error.
-func fillServiceDetails(ctx context.Context, d dokploy.Detailer, projects []dokploy.Project) (map[string]string, error) {
+// detailConcurrency calls in flight, and returns the appNames it read, keyed
+// by detailKey. A failed call does not fail the list: the service keeps its
+// ID and gets a warning, keyed by detailKey. Only cancellation of ctx is
+// returned as an error.
+func fillServiceDetails(ctx context.Context, d dokploy.Detailer, projects []dokploy.Project) (map[string]string, map[string]string, error) {
 	var incomplete []*dokploy.Service
 	for i := range projects {
 		for j := range projects[i].Environments {
@@ -214,15 +223,17 @@ func fillServiceDetails(ctx context.Context, d dokploy.Detailer, projects []dokp
 	}
 
 	warnings := map[string]string{}
+	appNames := map[string]string{}
 	var mu sync.Mutex
 	err := forEachBounded(ctx, incomplete, func(s *dokploy.Service) {
 		details, err := d.Details(ctx, s.Type, s.ID)
+		mu.Lock()
+		defer mu.Unlock()
 		if err != nil {
-			mu.Lock()
 			warnings[detailKey(*s)] = fmt.Sprintf("name and status unknown: %v", err)
-			mu.Unlock()
 			return
 		}
+		appNames[detailKey(*s)] = details.AppName
 		if s.Name == "" {
 			s.Name = details.Name
 		}
@@ -231,9 +242,9 @@ func fillServiceDetails(ctx context.Context, d dokploy.Detailer, projects []dokp
 		}
 	})
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
-	return warnings, nil
+	return warnings, appNames, nil
 }
 
 // listComposeServices reads the names of the services inside every compose
