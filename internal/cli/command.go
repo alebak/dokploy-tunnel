@@ -125,4 +125,6 @@ type Env struct {
 	NotifyContext func(parent context.Context) (context.Context, context.CancelFunc)
 	// Listen opens a TCP listener for a forward; nil means net.Listen.
 	Listen func(network, addr string) (net.Listener, error)
+	// ProcessAlive reports whether a process is running.
+	ProcessAlive func(pid int) bool
 }

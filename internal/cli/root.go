@@ -1,7 +1,5 @@
 package cli
 
-import "github.com/alebak/dokploy-tunnel/internal/clierr"
-
 // NewRoot returns the doktunnel command tree.
 func NewRoot() *Command {
 	return &Command{
@@ -11,20 +9,8 @@ func NewRoot() *Command {
 			newContextCommand(),
 			newServicesCommand(),
 			newForwardCommand(),
-			{
-				Name:    "status",
-				Summary: "Show active forwards",
-				Run:     notImplemented("status"),
-			},
+			newStatusCommand(),
 			newHostsCommand(),
 		},
-	}
-}
-
-// notImplemented returns a Run function for a command that exists in the tree
-// but has no behavior yet.
-func notImplemented(name string) func(*Env, []string) error {
-	return func(*Env, []string) error {
-		return clierr.Newf(clierr.NotImplemented, "%s is not implemented yet", name)
 	}
 }

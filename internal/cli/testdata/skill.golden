@@ -91,6 +91,10 @@ Forwards each service on its own loopback address, leased from 127.77.0.0/16, an
 | `--port <port>` | forward this container port; only with a single service |
 | `--project <name or ID>` | only consider services of the project with this name or ID |
 
+### `doktunnel status`
+
+Lists the forwards of every running 'doktunnel forward' process, of all contexts, or only of the context named by an explicit --context. It reads the state files those processes keep in the doktunnel state directory and needs no network access. A file whose process is no longer running is stale and removed; a file of a running process that cannot be read, such as one written by another doktunnel version, is left in place and reported as a warning. A killed forward process whose PID was reused by another program is still listed until that program exits. Human output: a table with CONTEXT, HOSTNAME, ADDRESS, TARGET, PID and SINCE, sorted by context, hostname and port, or 'No active forwards.' on stderr. JSON output: `{"forwards":[...],"warnings":[...]}`, both always arrays, where each forward has `pid`, `started_at` (RFC 3339), `context`, `companion_url`, `target` (`type`, `id`, `name`), `hostname`, `ip` and `port`, and each warning is a string.
+
 ### `doktunnel hosts`
 
 doktunnel keeps one marked section in the hosts file, between '# BEGIN doktunnel' and '# END doktunnel' lines, and never touches any other line. Writing it needs administrator privileges, but doktunnel itself never runs as root: only the step that writes the file (and, on macOS, adds lo0 aliases) is re-run elevated, through sudo on Linux and macOS or a UAC prompt on Windows, and only when something changed. With --no-input, or when stdin is not a terminal, it fails with elevation_required instead, and the hint is the exact command to run.
