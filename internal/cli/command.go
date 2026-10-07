@@ -9,6 +9,7 @@ import (
 	"context"
 	"flag"
 	"io"
+	"net"
 	"net/url"
 
 	"github.com/alebak/dokploy-tunnel/internal/dokploy"
@@ -119,4 +120,9 @@ type Env struct {
 	// ProbeCompanion checks that a doktunnel companion answers at a URL;
 	// nil means an HTTP health check.
 	ProbeCompanion func(ctx context.Context, u *url.URL) error
+	// NotifyContext returns a copy of parent that is cancelled when the
+	// process is asked to stop.
+	NotifyContext func(parent context.Context) (context.Context, context.CancelFunc)
+	// Listen opens a TCP listener for a forward; nil means net.Listen.
+	Listen func(network, addr string) (net.Listener, error)
 }
