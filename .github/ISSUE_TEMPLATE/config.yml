@@ -3,3 +3,6 @@ contact_links:
   - name: Problems with Dokploy itself
     url: https://github.com/Dokploy/dokploy/issues
     about: dokploy-tunnel is a community project, not affiliated with Dokploy. Report Dokploy bugs upstream.
+  - name: Report a security vulnerability
+    url: https://github.com/alebak/dokploy-tunnel/security/advisories/new
+    about: Report vulnerabilities privately. Do not open a public issue. See SECURITY.md.
