@@ -28,11 +28,11 @@ Include:
 
 ## What to expect
 
-This is a solo-maintained project, so responses are best effort:
+This is a solo-maintained project, so responses are best effort and there is no guaranteed timeline. We will try to answer as soon as we can:
 
-| Step | Target |
-|------|--------|
-| Acknowledgement | Within a few days |
+| Step | What happens |
+|------|--------------|
+| Acknowledgement | A reply in the advisory thread as soon as possible |
 | Assessment | Confirmed or declined, with reasons, in the advisory thread |
 | Fix | A patch release, then a published advisory crediting you unless you prefer otherwise |
 
