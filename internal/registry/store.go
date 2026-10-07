@@ -39,8 +39,9 @@ type fileLease struct {
 	ServiceID      string     `json:"service_id"`
 	IP             netip.Addr `json:"ip"`
 	CreatedAt      time.Time  `json:"created_at"`
-	// Names are the display names the lease's hostname is built from; files
-	// written before names were recorded have none.
+	// Names are what the lease's hostname is built from; files written
+	// before names were recorded have none, and files written before
+	// hostnames came from the appName have only the context.
 	Names hostname.Names `json:"names,omitzero"`
 }
 

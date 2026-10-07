@@ -211,16 +211,16 @@ func (h *hostsHarness) lease(serviceID string, n hostname.Names) netip.Addr {
 
 func (h *hostsHarness) leaseFixture() {
 	h.t.Helper()
-	h.lease("cmp_myapp/postgres", hostname.Names{Context: "prod", Organization: "Acme", Project: "shop", Compose: "myapp", Service: "postgres"})
-	h.lease("redis_cache", hostname.Names{Context: "prod", Organization: "Acme", Project: "shop", Service: "cache"})
+	h.lease("cmp_myapp/postgres", hostname.Names{Context: "prod", AppName: "shop-myapp-x1y2z3", ComposeService: "postgres"})
+	h.lease("redis_cache", hostname.Names{Context: "prod", AppName: "shop-cache-g7h8i9"})
 }
 
 // fixtureEntries is what the privileged helper receives for leaseFixture.
-const fixtureEntries = "127.77.0.1\tpostgres.myapp.shop.acme.prod.internal\n127.77.0.2\tcache.shop.acme.prod.internal\n"
+const fixtureEntries = "127.77.0.1\tpostgres.shop-myapp-x1y2z3.internal\n127.77.0.2\tshop-cache-g7h8i9.internal\n"
 
 const fixtureBlock = hosts.BeginLine + "\r\n" +
-	"127.77.0.1\tpostgres.myapp.shop.acme.prod.internal\r\n" +
-	"127.77.0.2\tcache.shop.acme.prod.internal\r\n" +
+	"127.77.0.1\tpostgres.shop-myapp-x1y2z3.internal\r\n" +
+	"127.77.0.2\tshop-cache-g7h8i9.internal\r\n" +
 	hosts.EndLine + "\r\n"
 
 func (h *hostsHarness) pendingPath() string {
@@ -371,8 +371,8 @@ func TestHostsSync_DryRun(t *testing.T) {
 		t.Fatalf("exit = %d (stderr %q)", r.exit, r.stderr)
 	}
 	wantDiff := "- 127.77.0.9\told.shop.acme.prod.internal\n" +
-		"+ 127.77.0.1\tpostgres.myapp.shop.acme.prod.internal\n" +
-		"+ 127.77.0.2\tcache.shop.acme.prod.internal\n"
+		"+ 127.77.0.1\tpostgres.shop-myapp-x1y2z3.internal\n" +
+		"+ 127.77.0.2\tshop-cache-g7h8i9.internal\n"
 	if !strings.Contains(r.stdout, wantDiff) {
 		t.Errorf("stdout =\n%s\nwant it to contain\n%s", r.stdout, wantDiff)
 	}
@@ -399,8 +399,8 @@ func TestHostsSync_JSONShape(t *testing.T) {
 		t.Fatalf("exit = %d (stdout %q)", r.exit, r.stdout)
 	}
 	want := `{"hosts_file":"` + jsonEscape(h.hostsPath) + `","dry_run":false,"changed":true,` +
-		`"added":[{"ip":"127.77.0.1","hostname":"postgres.myapp.shop.acme.prod.internal"},` +
-		`{"ip":"127.77.0.2","hostname":"cache.shop.acme.prod.internal"}],"removed":[],"aliases":[]}` + "\n"
+		`"added":[{"ip":"127.77.0.1","hostname":"postgres.shop-myapp-x1y2z3.internal"},` +
+		`{"ip":"127.77.0.2","hostname":"shop-cache-g7h8i9.internal"}],"removed":[],"aliases":[]}` + "\n"
 	if r.stdout != want {
 		t.Errorf("stdout =\n%s\nwant\n%s", r.stdout, want)
 	}
@@ -501,14 +501,14 @@ func TestHostsList(t *testing.T) {
 		t.Fatalf("exit = %d (stdout %q)", r.exit, r.stdout)
 	}
 	want := `{"hosts_file":"` + jsonEscape(h.hostsPath) + `","entries":[` +
-		`{"ip":"127.77.0.1","hostname":"postgres.myapp.shop.acme.prod.internal"},` +
-		`{"ip":"127.77.0.2","hostname":"cache.shop.acme.prod.internal"}]}` + "\n"
+		`{"ip":"127.77.0.1","hostname":"postgres.shop-myapp-x1y2z3.internal"},` +
+		`{"ip":"127.77.0.2","hostname":"shop-cache-g7h8i9.internal"}]}` + "\n"
 	if r.stdout != want {
 		t.Errorf("stdout =\n%s\nwant\n%s", r.stdout, want)
 	}
 
 	r = h.run(false, "hosts", "list")
-	if !strings.Contains(r.stdout, "127.77.0.1") || !strings.Contains(r.stdout, "postgres.myapp.shop.acme.prod.internal") {
+	if !strings.Contains(r.stdout, "127.77.0.1") || !strings.Contains(r.stdout, "postgres.shop-myapp-x1y2z3.internal") {
 		t.Errorf("human output = %q", r.stdout)
 	}
 

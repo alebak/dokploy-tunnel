@@ -207,8 +207,8 @@ func seedRegistry(t *testing.T, path string) []hosts.Entry {
 		id    string
 		names hostname.Names
 	}{
-		{"app_web", hostname.Names{Context: "ci", Organization: "Platform Org", Project: "doktunnel", Service: "web"}},
-		{"cmp_stack/db", hostname.Names{Context: "ci", Organization: "Platform Org", Project: "doktunnel", Compose: "stack", Service: "db"}},
+		{"app_web", hostname.Names{Context: "ci", AppName: "doktunnel-web-a1b2c3"}},
+		{"cmp_stack/db", hostname.Names{Context: "ci", AppName: "doktunnel-stack-d4e5f6", ComposeService: "db"}},
 	}
 	for _, s := range services {
 		k := registry.Key{Instance: "https://dokploy.example.com", OrganizationID: "org_ci", ServiceID: s.id}

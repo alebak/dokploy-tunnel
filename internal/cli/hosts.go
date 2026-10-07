@@ -106,8 +106,10 @@ func newHostsSyncCommand() *Command {
 		Summary: "Write the hostnames of registered services to the hosts file",
 		Description: "Computes the doktunnel section from the services registered in the address registry and " +
 			"writes it only when it differs from the current one; on macOS it also adds missing lo0 aliases. " +
-			"Hostnames are `<service>.<project>.<org>.<context>.internal`, or " +
-			"`<service>.<compose>.<project>.<org>.<context>.internal` for a service inside a compose stack. " +
+			"Hostnames are `<appName>.internal` for an application or database, and " +
+			"`<service>.<appName>.internal` for a service inside a compose stack, where appName is the name Dokploy " +
+			"deploys the service or stack under (its Dokploy ID when it cannot be read); a name an older lease " +
+			"already holds gets the context as an extra label, `<appName>.<context>.internal`. " +
 			"JSON output: `{\"hosts_file\":\"<path>\",\"dry_run\":<bool>,\"changed\":<bool>,\"added\":[...],\"removed\":[...],\"aliases\":[...]}`, " +
 			"where `added` and `removed` hold `{\"ip\",\"hostname\"}` entries and `aliases` the lo0 addresses added " +
 			"(or, with --dry-run, to add). `changed` is false when nothing had to change.",

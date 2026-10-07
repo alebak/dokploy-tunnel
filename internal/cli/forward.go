@@ -104,8 +104,15 @@ type forwardTarget struct {
 	project, environment string
 	// ref addresses the service on the companion.
 	ref tunnel.TargetRef
-	// names are the hostname names, without context and organization.
+	// names are what the hostname is built from, without the context, and
+	// without the appName until withAppNames fills it in.
 	names hostname.Names
+}
+
+// dokployKey is the detailKey of the Dokploy service t belongs to: the
+// service itself, or the compose stack of a service inside one.
+func (t forwardTarget) dokployKey() string {
+	return string(t.ref.ServiceType) + "/" + t.ref.ServiceID
 }
 
 // label describes t in the picker and in messages.
@@ -127,8 +134,7 @@ func (c *catalog) targets() []forwardTarget {
 				if s.Type != dokploy.ServiceCompose {
 					out = append(out, forwardTarget{
 						typ: string(s.Type), id: s.ID, name: name, project: project, environment: env,
-						ref:   tunnel.TargetRef{ServiceType: s.Type, ServiceID: s.ID},
-						names: hostname.Names{Project: project, Service: name},
+						ref: tunnel.TargetRef{ServiceType: s.Type, ServiceID: s.ID},
 					})
 					continue
 				}
@@ -136,13 +142,60 @@ func (c *catalog) targets() []forwardTarget {
 					out = append(out, forwardTarget{
 						typ: typeComposeService, id: s.ID + "/" + svc, name: name + "/" + svc, project: project, environment: env,
 						ref:   tunnel.TargetRef{ServiceType: dokploy.ServiceCompose, ServiceID: s.ID, ComposeService: svc},
-						names: hostname.Names{Project: project, Compose: name, Service: svc},
+						names: hostname.Names{ComposeService: svc},
 					})
 				}
 			}
 		}
 	}
 	return out
+}
+
+// withAppNames returns targets with the appName of each one's Dokploy
+// service filled in, reading with at most detailConcurrency calls in flight
+// the details the catalog has not read yet. A service whose details cannot
+// be read is named after its Dokploy ID instead, with a warning. Only
+// cancellation of ctx is returned as an error.
+func (c *catalog) withAppNames(ctx context.Context, e *Env, targets []forwardTarget) ([]forwardTarget, error) {
+	var missing []forwardTarget
+	queued := map[string]bool{}
+	for _, t := range targets {
+		if k := t.dokployKey(); c.appNames[k] == "" && !queued[k] {
+			queued[k] = true
+			missing = append(missing, t)
+		}
+	}
+	failed := map[string]error{}
+	var mu sync.Mutex
+	err := forEachBounded(ctx, missing, func(t forwardTarget) {
+		details, err := c.details.Details(ctx, t.ref.ServiceType, t.ref.ServiceID)
+		mu.Lock()
+		defer mu.Unlock()
+		if err == nil && details.AppName == "" {
+			err = errors.New("the service details hold no appName")
+		}
+		if err != nil {
+			failed[t.dokployKey()] = err
+			return
+		}
+		if c.appNames == nil {
+			c.appNames = map[string]string{}
+		}
+		c.appNames[t.dokployKey()] = details.AppName
+	})
+	if err != nil {
+		return nil, err
+	}
+	for _, t := range missing {
+		if err := failed[t.dokployKey()]; err != nil {
+			e.warn(fmt.Sprintf("%s %s: appName unknown (%v); its hostname uses the Dokploy ID instead", t.ref.ServiceType, t.ref.ServiceID, err))
+		}
+	}
+	out := slices.Clone(targets)
+	for i := range out {
+		out[i].names.AppName = orID(c.appNames[out[i].dokployKey()], out[i].ref.ServiceID)
+	}
+	return out, nil
 }
 
 func orID(name, id string) string {
@@ -334,6 +387,9 @@ func runForward(env *Env, args []string, opts forwardOptions) error {
 		return clierr.Newf(clierr.InvalidArgument, "--port applies to a single service, and %d are selected", len(selected)).
 			WithHint("forward the services one at a time to pick a port for each")
 	}
+	if selected, err = cat.withAppNames(ctx, env, selected); err != nil {
+		return err
+	}
 
 	companionURL := cat.context.CompanionURL
 	if companionURL == "" {
@@ -358,8 +414,8 @@ func runForward(env *Env, args []string, opts forwardOptions) error {
 	return env.serveForwards(cat.context.Name, companionURL, client, planned)
 }
 
-// leaseAndSync leases an address for every target, records its hostname
-// names, and syncs the hosts file and loopback aliases.
+// leaseAndSync leases an address for every target, records what its
+// hostname is built from, and syncs the hosts file and loopback aliases.
 func (e *Env) leaseAndSync(ctx context.Context, cat *catalog, targets []forwardTarget, ports [][]int) ([]plannedForward, error) {
 	regPath, err := e.registryPath()
 	if err != nil {
@@ -369,7 +425,6 @@ func (e *Env) leaseAndSync(ctx context.Context, cat *catalog, targets []forwardT
 	if err != nil {
 		return nil, err
 	}
-	org := orID(cat.context.OrganizationName, cat.context.OrganizationID)
 	ips := make([]netip.Addr, len(targets))
 	for i, t := range targets {
 		k := registry.Key{Instance: cat.context.URL, OrganizationID: cat.context.OrganizationID, ServiceID: t.id}
@@ -377,7 +432,7 @@ func (e *Env) leaseAndSync(ctx context.Context, cat *catalog, targets []forwardT
 			return nil, leaseError(regPath, err)
 		}
 		names := t.names
-		names.Context, names.Organization = cat.context.Name, org
+		names.Context = cat.context.Name
 		if _, err := reg.SetNames(k, names); err != nil {
 			return nil, leaseError(regPath, err)
 		}

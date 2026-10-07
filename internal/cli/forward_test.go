@@ -24,6 +24,7 @@ import (
 
 	"github.com/alebak/dokploy-tunnel/internal/clierr"
 	"github.com/alebak/dokploy-tunnel/internal/dokploy"
+	"github.com/alebak/dokploy-tunnel/internal/hostname"
 	"github.com/alebak/dokploy-tunnel/internal/hosts"
 	"github.com/alebak/dokploy-tunnel/internal/registry"
 	"github.com/alebak/dokploy-tunnel/internal/runstate"
@@ -292,53 +293,53 @@ func TestForward_SelectsTargetsAndResolvesPorts(t *testing.T) {
 		{
 			name: "database by name uses its default port",
 			args: []string{"main-db"},
-			want: []string{"pg_main@127.77.0.1:5432=main-db.shop.acme.prod.internal"},
+			want: []string{"pg_main@127.77.0.1:5432=shop-maindb-a1b2c3.internal"},
 		},
 		{
 			name: "database by ID",
 			args: []string{"pg_main"},
-			want: []string{"pg_main@127.77.0.1:5432=main-db.shop.acme.prod.internal"},
+			want: []string{"pg_main@127.77.0.1:5432=shop-maindb-a1b2c3.internal"},
 		},
 		{
 			name:       "compose service by name asks the companion",
 			args:       []string{"myapp/postgres"},
-			want:       []string{"cmp_myapp/postgres@127.77.0.1:5432=postgres.myapp.shop.acme.prod.internal"},
+			want:       []string{"cmp_myapp/postgres@127.77.0.1:5432=postgres.shop-myapp-x1y2z3.internal"},
 			portsCalls: []string{"cmp_myapp/postgres"},
 		},
 		{
 			name:       "compose service by ID",
 			args:       []string{"cmp_myapp/postgres"},
-			want:       []string{"cmp_myapp/postgres@127.77.0.1:5432=postgres.myapp.shop.acme.prod.internal"},
+			want:       []string{"cmp_myapp/postgres@127.77.0.1:5432=postgres.shop-myapp-x1y2z3.internal"},
 			portsCalls: []string{"cmp_myapp/postgres"},
 		},
 		{
 			name: "several services, a repeated one once",
 			args: []string{"main-db", "cache", "pg_main"},
 			want: []string{
-				"pg_main@127.77.0.1:5432=main-db.shop.acme.prod.internal",
-				"redis_cache@127.77.0.2:6379=cache.shop.acme.prod.internal",
+				"pg_main@127.77.0.1:5432=shop-maindb-a1b2c3.internal",
+				"redis_cache@127.77.0.2:6379=shop-cache-g7h8i9.internal",
 			},
 		},
 		{
 			name:       "--all-ports forwards every exposed port",
 			args:       []string{"myapp/pgadmin", "--all-ports"},
-			want:       []string{"cmp_myapp/pgadmin@127.77.0.1:80=pgadmin.myapp.shop.acme.prod.internal", "cmp_myapp/pgadmin@127.77.0.1:443=pgadmin.myapp.shop.acme.prod.internal"},
+			want:       []string{"cmp_myapp/pgadmin@127.77.0.1:80=pgadmin.shop-myapp-x1y2z3.internal", "cmp_myapp/pgadmin@127.77.0.1:443=pgadmin.shop-myapp-x1y2z3.internal"},
 			portsCalls: []string{"cmp_myapp/pgadmin"},
 		},
 		{
 			name: "--port wins over the companion",
 			args: []string{"myapp/pgadmin", "--port", "8080"},
-			want: []string{"cmp_myapp/pgadmin@127.77.0.1:8080=pgadmin.myapp.shop.acme.prod.internal"},
+			want: []string{"cmp_myapp/pgadmin@127.77.0.1:8080=pgadmin.shop-myapp-x1y2z3.internal"},
 		},
 		{
 			name: "--port wins over a database default",
 			args: []string{"--port", "6543", "main-db"},
-			want: []string{"pg_main@127.77.0.1:6543=main-db.shop.acme.prod.internal"},
+			want: []string{"pg_main@127.77.0.1:6543=shop-maindb-a1b2c3.internal"},
 		},
 		{
 			name: "a service whose name is unknown is named by its ID",
 			args: []string{"libsql_edge"},
-			want: []string{"libsql_edge@127.77.0.1:8080=libsql-edge.shop.acme.prod.internal"},
+			want: []string{"libsql_edge@127.77.0.1:8080=libsql-edge.internal"},
 		},
 	}
 	for _, tt := range tests {
@@ -388,9 +389,9 @@ func TestForward_AllForwardsEveryTargetInScope(t *testing.T) {
 	// The compose stack itself is not forwardable, and cmp_stack has no
 	// readable services.
 	want := []string{
-		"app_web@127.77.0.1:3000=web.shop.acme.prod.internal",
-		"pg_main@127.77.0.2:5432=main-db.shop.acme.prod.internal",
-		"redis_cache@127.77.0.3:6379=cache.shop.acme.prod.internal",
+		"app_web@127.77.0.1:3000=shop-web-d4e5f6.internal",
+		"pg_main@127.77.0.2:5432=shop-maindb-a1b2c3.internal",
+		"redis_cache@127.77.0.3:6379=shop-cache-g7h8i9.internal",
 	}
 	if !slices.Equal(got, want) {
 		t.Errorf("forwards = %q, want %q", got, want)
@@ -480,8 +481,8 @@ func TestForward_InteractivePicker(t *testing.T) {
 	}
 	got := decodeJSON[forwardOut](t, r.stdout).summary()
 	want := []string{
-		"pg_main@127.77.0.1:5432=main-db.shop.acme.prod.internal",
-		"cmp_myapp/postgres@127.77.0.2:5432=postgres.myapp.shop.acme.prod.internal",
+		"pg_main@127.77.0.1:5432=shop-maindb-a1b2c3.internal",
+		"cmp_myapp/postgres@127.77.0.2:5432=postgres.shop-myapp-x1y2z3.internal",
 	}
 	if !slices.Equal(got, want) {
 		t.Errorf("forwards = %q, want %q", got, want)
@@ -490,7 +491,7 @@ func TestForward_InteractivePicker(t *testing.T) {
 
 func TestForward_SyncsHostsFile(t *testing.T) {
 	const block = hosts.BeginLine + "\r\n" +
-		"127.77.0.1\tmain-db.shop.acme.prod.internal\r\n" +
+		"127.77.0.1\tshop-maindb-a1b2c3.internal\r\n" +
 		hosts.EndLine + "\r\n"
 
 	t.Run("writes the entry and names the lease", func(t *testing.T) {
@@ -516,7 +517,7 @@ func TestForward_SyncsHostsFile(t *testing.T) {
 		if k.Instance != "https://panel.example.com" || k.OrganizationID != "org1" || k.ServiceID != "pg_main" {
 			t.Errorf("lease key = %+v, want the panel, org1 and pg_main", k)
 		}
-		if n := leases[0].Names; n.Context != "prod" || n.Organization != "Acme" || n.Project != "shop" || n.Service != "main-db" || n.Compose != "" {
+		if n := leases[0].Names; n != (hostname.Names{Context: "prod", AppName: "shop-maindb-a1b2c3"}) {
 			t.Errorf("lease names = %+v", n)
 		}
 	})
@@ -586,8 +587,8 @@ func TestForward_HumanOutput(t *testing.T) {
 	if r.exit != 0 {
 		t.Fatalf("exit = %d (stderr %q)", r.exit, r.stderr)
 	}
-	want := "postgres.myapp.shop.acme.prod.internal (127.77.0.1:5432) → myapp/postgres\n" +
-		"main-db.shop.acme.prod.internal (127.77.0.2:5432) → main-db\n"
+	want := "postgres.shop-myapp-x1y2z3.internal (127.77.0.1:5432) → myapp/postgres\n" +
+		"shop-maindb-a1b2c3.internal (127.77.0.2:5432) → main-db\n"
 	if r.stdout != want {
 		t.Errorf("stdout =\n%s\nwant\n%s", r.stdout, want)
 	}
@@ -619,7 +620,7 @@ func TestForward_EndToEnd(t *testing.T) {
 		time.Sleep(5 * time.Millisecond)
 	}
 	out := decodeJSON[forwardOut](t, stdout.String())
-	if got := out.summary(); len(got) != 1 || got[0] != "cmp_myapp/postgres@127.77.0.1:5432=postgres.myapp.shop.acme.prod.internal" {
+	if got := out.summary(); len(got) != 1 || got[0] != "cmp_myapp/postgres@127.77.0.1:5432=postgres.shop-myapp-x1y2z3.internal" {
 		t.Fatalf("forwards = %q", got)
 	}
 
@@ -629,7 +630,7 @@ func TestForward_EndToEnd(t *testing.T) {
 		t.Fatalf("reading the state file: %v", err)
 	}
 	if state.Context != "prod" || state.CompanionURL != h.companion.url() || len(state.Forwards) != 1 ||
-		state.Forwards[0].Hostname != "postgres.myapp.shop.acme.prod.internal" || state.Forwards[0].Port != 5432 ||
+		state.Forwards[0].Hostname != "postgres.shop-myapp-x1y2z3.internal" || state.Forwards[0].Port != 5432 ||
 		state.Forwards[0].IP != netip.MustParseAddr("127.77.0.1") ||
 		state.Forwards[0].Target != (runstate.Target{Type: "compose_service", ID: "cmp_myapp/postgres", Name: "myapp/postgres"}) {
 		t.Errorf("state = %+v", state)
@@ -718,5 +719,65 @@ func TestForward_BindFailureForwardsNothing(t *testing.T) {
 	}
 	if entries, _ := runstate.List(h.stateDir()); len(entries) != 0 {
 		t.Errorf("state files = %+v, want none", entries)
+	}
+}
+
+func TestForward_UnknownAppNameFallsBackToTheID(t *testing.T) {
+	h := newForwardHarness(t)
+	r := h.forward("", false, "libsql_edge")
+	if r.exit != 0 {
+		t.Fatalf("exit = %d (stderr %q)", r.exit, r.stderr)
+	}
+	if !strings.HasPrefix(r.stdout, "libsql-edge.internal (127.77.0.1:8080) → libsql_edge\n") {
+		t.Errorf("stdout = %q, want the hostname built from the ID", r.stdout)
+	}
+	if !strings.Contains(r.stderr, "warning: libsql libsql_edge: appName unknown") {
+		t.Errorf("stderr = %q, want a warning about the unknown appName", r.stderr)
+	}
+}
+
+func TestForward_ReadsEachAppNameOnce(t *testing.T) {
+	h := newForwardHarness(t)
+	h.companion.ports["cmp_myapp/pgadmin"] = []int{80}
+	if r := h.forward("", false, "myapp/postgres", "myapp/pgadmin", "main-db", "--json"); r.exit != 0 {
+		t.Fatalf("exit = %d (stdout %q)", r.exit, r.stdout)
+	}
+	// pg_main was read while listing services; the stack once for both
+	// of its services.
+	want := map[string]int{"postgres/pg_main": 1, "libsql/libsql_edge": 1, "compose/cmp_myapp": 1}
+	got := map[string]int{}
+	for _, c := range h.api.detailCalls {
+		got[c]++
+	}
+	if fmt.Sprint(got) != fmt.Sprint(want) {
+		t.Errorf("detail calls = %v, want %v", got, want)
+	}
+}
+
+func TestForward_MigratesNamesOfAnOlderVersion(t *testing.T) {
+	h := newForwardHarness(t)
+	// An older doktunnel leased main-db 127.77.0.7 under its display names
+	// and wrote that name to the hosts file.
+	old := `{"version":1,"leases":[{"instance":"https://panel.example.com","organization_id":"org1","service_id":"pg_main",` +
+		`"ip":"127.77.0.7","created_at":"2026-01-01T00:00:00Z",` +
+		`"names":{"context":"prod","organization":"Acme","project":"shop","service":"main-db"}}]}`
+	if err := os.MkdirAll(filepath.Dir(h.hosts.registryPath), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(h.hosts.registryPath, []byte(old), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	h.hosts.writeHosts(fixtureHosts + hosts.BeginLine + "\r\n127.77.0.7\tmain-db.shop.acme.prod.internal\r\n" + hosts.EndLine + "\r\n")
+
+	r := h.forward("", false, "main-db", "--json")
+	if r.exit != 0 {
+		t.Fatalf("exit = %d (stdout %q)", r.exit, r.stdout)
+	}
+	if got := decodeJSON[forwardOut](t, r.stdout).summary(); !slices.Equal(got, []string{"pg_main@127.77.0.7:5432=shop-maindb-a1b2c3.internal"}) {
+		t.Errorf("forwards = %q, want the old address under the new name", got)
+	}
+	want := fixtureHosts + hosts.BeginLine + "\r\n127.77.0.7\tshop-maindb-a1b2c3.internal\r\n" + hosts.EndLine + "\r\n"
+	if got := h.hosts.readHosts(); got != want {
+		t.Errorf("hosts file =\n%q\nwant\n%q", got, want)
 	}
 }

@@ -166,11 +166,11 @@ Lists are always present, possibly empty. New fields may be added; existing fiel
 ```console
 $ doktunnel forward myapp/postgres main-db
 Updated /etc/hosts: 2 added, 0 removed.
-postgres.myapp.shop.acme.prod.internal (127.77.0.1:5432) → myapp/postgres
-main-db.shop.acme.prod.internal (127.77.0.2:5432) → main-db
+postgres.shop-myapp-x1y2z3.internal (127.77.0.1:5432) → myapp/postgres
+shop-maindb-a1b2c3.internal (127.77.0.2:5432) → main-db
 Forwarding; press Ctrl+C to stop.
 
-$ psql -h postgres.myapp.shop.acme.prod.internal -U app   # in another terminal
+$ psql -h postgres.shop-myapp-x1y2z3.internal -U app   # in another terminal
 ```
 
 Name services as [`services`](#services) lists them: by name, as `<compose>/<service>` for a service inside a compose stack, or by ID. IDs always win; a name shared by several services fails with `invalid_argument` listing them, so pass the ID instead. A compose stack itself is not forwardable, only the services inside it. `--project <name or ID>` limits the search to one project, `--all` forwards every service in scope, and with no service and no `--all` doktunnel asks which ones to forward (with `--no-input`, it fails with `missing_input`).
@@ -183,14 +183,14 @@ Name services as [`services`](#services) lists them: by name, as `<compose>/<ser
 
 doktunnel never guesses: a container that exposes no port fails with `missing_input` naming `--port`, and one that exposes several (such as RabbitMQ's 5672 and 15672) fails the same way unless you pass `--all-ports` to forward each of them. With `--all`, every selected service must resolve; narrow the selection or name the services otherwise.
 
-**Addresses and hosts file.** Each service is leased its address in the [address registry](#hostnames), its hostname is recorded, and the hosts file is synced exactly as `doktunnel hosts sync` does: it asks for administrator privileges once, and only when something changed. On macOS the same step adds the `lo0` aliases, which are lost on reboot. With `--no-input` and a change to make, `forward` fails with `elevation_required`, and the hint is the command to run first. Listeners are bound to the leased address and port only, never `0.0.0.0`; if any of them cannot be bound (for example, the service is already forwarded by another `doktunnel forward`), nothing is forwarded.
+**Addresses and hosts file.** Each service is leased its address in the [address registry](#hostnames), its appName is read (one details call per service or compose stack whose appName `doktunnel` does not know yet) and recorded, and the hosts file is synced exactly as `doktunnel hosts sync` does: it asks for administrator privileges once, and only when something changed. On macOS the same step adds the `lo0` aliases, which are lost on reboot. With `--no-input` and a change to make, `forward` fails with `elevation_required`, and the hint is the command to run first. Listeners are bound to the leased address and port only, never `0.0.0.0`; if any of them cannot be bound (for example, the service is already forwarded by another `doktunnel forward`), nothing is forwarded.
 
 **Connections.** Every local connection opens its own tunnel through the context's [companion](#companion-url). Connection events go to stderr, one line each. Ctrl+C or `SIGTERM` (on Windows, Ctrl+C, Ctrl+Break or closing the console) closes every open tunnel, so the companion removes its repeaters once their grace period ends, and exits with code 0.
 
 With `--json`, `forward` prints one object once every forward listens, and nothing else afterwards:
 
 ```json
-{"context":"prod","pid":4242,"started_at":"2026-10-06T12:00:00Z","companion_url":"https://dokploy.example.com/doktunnel","forwards":[{"target":{"type":"compose_service","id":"cmp_myapp/postgres","name":"myapp/postgres"},"hostname":"postgres.myapp.shop.acme.prod.internal","ip":"127.77.0.1","port":5432}]}
+{"context":"prod","pid":4242,"started_at":"2026-10-06T12:00:00Z","companion_url":"https://dokploy.example.com/doktunnel","forwards":[{"target":{"type":"compose_service","id":"cmp_myapp/postgres","name":"myapp/postgres"},"hostname":"postgres.shop-myapp-x1y2z3.internal","ip":"127.77.0.1","port":5432}]}
 ```
 
 `target.type` is the Dokploy service type or `compose_service`, and `target.id` and `target.name` are as `services` reports them. While it runs, each `forward` process records the same data in `forwards/<pid>.json` in the doktunnel state directory (next to the address registry), which [`doktunnel status`](#status) lists; the file is removed on exit.
@@ -201,9 +201,9 @@ With `--json`, `forward` prints one object once every forward listens, and nothi
 
 ```console
 $ doktunnel status
-CONTEXT  HOSTNAME                                ADDRESS          TARGET          PID   SINCE
-prod     main-db.shop.acme.prod.internal         127.77.0.2:5432  main-db         4242  2026-10-06 07:00:00
-prod     postgres.myapp.shop.acme.prod.internal  127.77.0.1:5432  myapp/postgres  4242  2026-10-06 07:00:00
+CONTEXT  HOSTNAME                             ADDRESS          TARGET          PID   SINCE
+prod     postgres.shop-myapp-x1y2z3.internal  127.77.0.1:5432  myapp/postgres  4242  2026-10-06 07:00:00
+prod     shop-maindb-a1b2c3.internal          127.77.0.2:5432  main-db         4242  2026-10-06 07:00:00
 ```
 
 Rows are sorted by context, hostname and port, and `SINCE` is when the process started forwarding, in local time. With no running forward it prints `No active forwards.` to stderr. `status` shows every context unless `--context <name>` is given explicitly; the current context does not filter it. It needs no network access and no configured context.
@@ -213,7 +213,7 @@ It reads the files `forward` processes keep in `forwards/<pid>.json` in the dokt
 With `--json`:
 
 ```json
-{"forwards":[{"pid":4242,"started_at":"2026-10-06T12:00:00Z","context":"prod","companion_url":"https://dokploy.example.com/doktunnel","target":{"type":"postgres","id":"pg_main","name":"main-db"},"hostname":"main-db.shop.acme.prod.internal","ip":"127.77.0.2","port":5432}],"warnings":[]}
+{"forwards":[{"pid":4242,"started_at":"2026-10-06T12:00:00Z","context":"prod","companion_url":"https://dokploy.example.com/doktunnel","target":{"type":"postgres","id":"pg_main","name":"main-db"},"hostname":"shop-maindb-a1b2c3.internal","ip":"127.77.0.2","port":5432}],"warnings":[]}
 ```
 
 | Field | Meaning |
@@ -231,19 +231,23 @@ Every forwarded service gets its own loopback address from `127.77.0.0/16` and a
 
 | Target | Hostname |
 |--------|----------|
-| Dokploy service | `<service>.<project>.<org>.<context>.internal`, e.g. `main-db.shop.acme.prod.internal` |
-| Service inside a compose stack | `<service>.<compose>.<project>.<org>.<context>.internal`, e.g. `postgres.myapp.shop.acme.prod.internal` |
+| Application or database | `<appName>.internal`, e.g. `acme-postgres-a1b2c3.internal` |
+| Service inside a compose stack | `<service>.<appName>.internal`, e.g. `postgres.acme-billing-x1y2z3.internal` |
 
-**Labels.** Each part is built from a display name: lowercased, every character other than `a`–`z` and `0`–`9` (including dots, spaces and accented letters) becomes a hyphen, repeated hyphens collapse, and leading and trailing hyphens are dropped, so `Main DB` becomes `main-db`. A part longer than 63 characters is cut and ends in a short hash of the full name; a name with no usable character becomes `x-` and a hash. Whole hostnames never exceed 253 characters.
+The **appName** is the name Dokploy deploys an application, database or compose stack under: the one shown in the panel, which Dokploy builds from the name you chose plus 6 random characters, and also the directory of a compose stack in `/etc/dokploy/compose/<appName>/`. `<service>` is the service name in the compose file. doktunnel reads the appName from the service's details when you forward it; if they cannot be read (for example, the API key may not read that service's details), the hostname uses the service's Dokploy ID instead, and `forward` prints a warning.
 
-**Collisions.** Two services can end up with the same hostname, for example `Main DB` and `main_db`, or a service with the same name in two environments of one project. doktunnel never maps two services to one name: the service registered first keeps the plain hostname, and each later one gets a suffix of 6 hex characters derived from its Dokploy instance, organization and service ID, as in `main-db-1a2b3c.shop.acme.prod.internal` (longer when that is taken too). The result is deterministic, and an existing hostname never changes when a newer service with the same name appears.
+**Labels.** Each part is lowercased, every character other than `a`–`z` and `0`–`9` (including the dots and underscores an appName may hold, spaces and accented letters) becomes a hyphen, repeated hyphens collapse, and leading and trailing hyphens are dropped, so `Acme_Billing.x1y2z3` becomes `acme-billing-x1y2z3`. A part longer than 63 characters is cut and ends in a short hash of the full name; a name with no usable character becomes `x-` and a hash. Whole hostnames never exceed 253 characters.
+
+**Collisions.** appNames are unique within one Dokploy instance, but two contexts (two panels) can both hold one, and two names can differ only in characters that are turned into hyphens. doktunnel never maps two services to one name: the service registered first keeps the plain hostname, and a later one gets its context as an extra label, as in `postgres.acme-billing-x1y2z3.acme-staging.internal`. When that is taken too, its first label also gets a suffix of 6 hex characters derived from its Dokploy instance, organization and service ID, as in `postgres-1a2b3c.acme-billing-x1y2z3.acme-staging.internal` (longer when that is taken as well). The result is deterministic, and an existing hostname never changes when a newer service with the same name appears. doktunnel never uses names other software resolves under `.internal`, such as `host.docker.internal` or `metadata.google.internal`, nor any name below `docker.internal`, `containers.internal`, `google.internal`, `lima.internal`, `orb.internal` or `rancher-desktop.internal`; such a name is disambiguated the same way.
+
+**Upgrading from hostnames built from display names.** doktunnel versions before this one named services `<service>.<project>.<org>.<context>.internal`. Upgrading keeps every service's address; the next `forward` of a service records its appName, and the sync it runs replaces the old name in the hosts file. `hosts sync` drops old names of services that have not been forwarded since.
 
 **The hosts file section.** doktunnel writes the hostnames to the system hosts file (`/etc/hosts` on Linux and macOS, `%SystemRoot%\System32\drivers\etc\hosts` on Windows) inside one marked block:
 
 ```text
 # BEGIN doktunnel (managed block, do not edit; remove with 'doktunnel hosts clean')
-127.77.0.1	postgres.myapp.shop.acme.prod.internal
-127.77.0.2	main-db.shop.acme.prod.internal
+127.77.0.1	postgres.acme-billing-x1y2z3.internal
+127.77.0.2	acme-postgres-a1b2c3.internal
 # END doktunnel
 ```
 
@@ -261,10 +265,10 @@ doktunnel hosts clean            # remove the section, nothing else
 With `--json`, `hosts sync` prints `{"hosts_file","dry_run","changed","added","removed","aliases"}`, `hosts list` prints `{"hosts_file","entries"}` and `hosts clean` prints `{"hosts_file","changed","removed"}`, where every entry is `{"ip","hostname"}` and `aliases` lists the macOS loopback aliases added (or, with `--dry-run`, to add):
 
 ```json
-{"hosts_file":"/etc/hosts","entries":[{"ip":"127.77.0.1","hostname":"postgres.myapp.shop.acme.prod.internal"}]}
+{"hosts_file":"/etc/hosts","entries":[{"ip":"127.77.0.1","hostname":"postgres.acme-billing-x1y2z3.internal"}]}
 ```
 
-**Administrator privileges.** The hosts file belongs to root (Administrator on Windows), but doktunnel never runs as root: your API keys live in *your* OS keyring, and your config and address registry in *your* home directory, which a root process would not see. Instead, when the section must change, doktunnel re-runs only the privileged step, the same binary with an internal helper command that accepts nothing but addresses in `127.77.0.0/16` and doktunnel's own `.internal` hostnames (at least five labels), and never echoes what it rejects:
+**Administrator privileges.** The hosts file belongs to root (Administrator on Windows), but doktunnel never runs as root: your API keys live in *your* OS keyring, and your config and address registry in *your* home directory, which a root process would not see. Instead, when the section must change, doktunnel re-runs only the privileged step, the same binary with an internal helper command that accepts nothing but addresses in `127.77.0.0/16` and doktunnel's own `.internal` hostnames (never `host.docker.internal` and the other names listed under **Collisions**), and never echoes what it rejects:
 
 - **Linux and macOS:** through `sudo`, which asks for your password on the terminal; the new entries reach the helper on its standard input, so root never opens a file you point it at.
 - **macOS** also needs every address added to `lo0` (`/sbin/ifconfig lo0 alias <ip> up`); the aliases are lost on reboot, so `hosts sync` checks them and re-adds missing ones in the same step.
