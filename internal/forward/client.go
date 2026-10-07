@@ -22,10 +22,6 @@ import (
 	"github.com/alebak/dokploy-tunnel/internal/version"
 )
 
-// portsPath is the companion endpoint that lists the ports of a service.
-// It mirrors the contract of the companion's GET /v1/ports.
-const portsPath = "/v1/ports"
-
 // Limits of what the client reads from a companion.
 const (
 	// maxBodyBytes bounds a JSON body read from the companion.
@@ -40,19 +36,6 @@ const (
 // ErrCompanionUnreachable means the companion could not be reached, or did
 // not answer like a doktunnel companion.
 var ErrCompanionUnreachable = errors.New("companion unreachable")
-
-// Port is a container port a companion reports for a service.
-type Port struct {
-	// Port is the container port, from 1 to 65535.
-	Port int `json:"port"`
-	// Protocol is the transport protocol of the port, always "tcp".
-	Protocol string `json:"protocol"`
-}
-
-// portsResponse is the body of a successful ports request.
-type portsResponse struct {
-	Ports []Port `json:"ports"`
-}
 
 // Client talks to one companion with one API key. It is safe for
 // concurrent use.
@@ -100,17 +83,9 @@ func NewClient(companionURL, apiKey string) (*Client, error) {
 	}, nil
 }
 
-// endpoint returns the URL of the companion endpoint path for target,
-// expecting the target on serverID when it is not empty.
-func (c *Client) endpoint(path string, target tunnel.Target, serverID string, withPort bool) string {
+// endpoint returns the URL of the companion endpoint path with query q.
+func (c *Client) endpoint(path string, q url.Values) string {
 	u := c.base.JoinPath(path)
-	q := target.Query()
-	if !withPort {
-		q.Del(tunnel.ParamPort)
-	}
-	if serverID != "" {
-		q.Set(tunnel.ParamServerID, serverID)
-	}
 	u.RawQuery = q.Encode()
 	return u.String()
 }
@@ -124,15 +99,15 @@ func (c *Client) header() http.Header {
 	return h
 }
 
-// Ports asks the companion which TCP ports target exposes, sorted by port.
-// target.Port is ignored. serverID, when not empty, is the Dokploy server
-// the target is expected on. A rejection by the companion is a
+// Ports asks the companion which TCP ports the service ref names exposes,
+// sorted by port. ref.ServerID, when not empty, is the Dokploy server the
+// service is expected on. A rejection by the companion is a
 // *CompanionError; a companion that cannot be reached wraps
 // ErrCompanionUnreachable.
-func (c *Client) Ports(ctx context.Context, target tunnel.Target, serverID string) ([]Port, error) {
+func (c *Client) Ports(ctx context.Context, ref tunnel.TargetRef) ([]tunnel.Port, error) {
 	ctx, cancel := context.WithTimeout(ctx, requestTimeout)
 	defer cancel()
-	endpoint := c.endpoint(portsPath, target, serverID, false)
+	endpoint := c.endpoint(tunnel.PortsPath, ref.Query())
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
 	if err != nil {
 		return nil, fmt.Errorf("building ports request: %w", err)
@@ -140,7 +115,7 @@ func (c *Client) Ports(ctx context.Context, target tunnel.Target, serverID strin
 	req.Header = c.header()
 	resp, err := c.http.Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("%w: requesting the ports of %s: %w", ErrCompanionUnreachable, target.ServiceID, err)
+		return nil, fmt.Errorf("%w: requesting the ports of %s: %w", ErrCompanionUnreachable, ref.ServiceID, err)
 	}
 	defer resp.Body.Close()
 	body := io.LimitReader(resp.Body, maxBodyBytes)
@@ -148,20 +123,20 @@ func (c *Client) Ports(ctx context.Context, target tunnel.Target, serverID strin
 		return nil, readError(resp.StatusCode, body)
 	}
 
-	var pr portsResponse
+	var pr tunnel.PortsResponse
 	if err := json.NewDecoder(body).Decode(&pr); err != nil {
 		return nil, fmt.Errorf("%w: the ports answer is not valid JSON: %w", ErrCompanionUnreachable, err)
 	}
 	for _, p := range pr.Ports {
-		if p.Port < 1 || p.Port > 65535 || p.Protocol != "tcp" {
+		if p.Port < 1 || p.Port > 65535 || p.Protocol != tunnel.ProtocolTCP {
 			return nil, fmt.Errorf("%w: the companion reported an invalid port %d/%s",
 				ErrCompanionUnreachable, p.Port, p.Protocol)
 		}
 	}
-	slices.SortFunc(pr.Ports, func(a, b Port) int { return a.Port - b.Port })
+	slices.SortFunc(pr.Ports, func(a, b tunnel.Port) int { return a.Port - b.Port })
 	pr.Ports = slices.Compact(pr.Ports)
 	if pr.Ports == nil {
-		pr.Ports = []Port{}
+		pr.Ports = []tunnel.Port{}
 	}
 	return pr.Ports, nil
 }
@@ -172,7 +147,11 @@ func (c *Client) Ports(ctx context.Context, target tunnel.Target, serverID strin
 func (c *Client) dial(ctx context.Context, target tunnel.Target, serverID string) (*websocket.Conn, error) {
 	ctx, cancel := context.WithTimeout(ctx, dialTimeout)
 	defer cancel()
-	conn, resp, err := websocket.Dial(ctx, c.endpoint(tunnel.Path, target, serverID, true), &websocket.DialOptions{
+	q := target.Query()
+	if serverID != "" {
+		q.Set(tunnel.ParamServerID, serverID)
+	}
+	conn, resp, err := websocket.Dial(ctx, c.endpoint(tunnel.Path, q), &websocket.DialOptions{
 		HTTPClient: c.http,
 		HTTPHeader: c.header(),
 	})

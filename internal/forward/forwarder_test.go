@@ -430,3 +430,31 @@ func TestListen_RefusesTargetWithoutPort(t *testing.T) {
 		t.Fatal("Listen() error = nil, want a refusal of port 0")
 	}
 }
+
+func TestListen_UsesTheListenSeamWithTheValidatedAddress(t *testing.T) {
+	c := newTestClient(t, "https://dokploy.example.com")
+	var asked []string
+	f, err := c.Listen(Config{
+		Addr:   "127.77.0.9:5432",
+		Target: pgTarget,
+		Listen: func(network, addr string) (net.Listener, error) {
+			asked = append(asked, network+" "+addr)
+			return net.Listen("tcp", "127.0.0.1:0")
+		},
+	})
+	if err != nil {
+		t.Fatalf("Listen() error = %v", err)
+	}
+	defer f.Close()
+	if want := []string{"tcp 127.77.0.9:5432"}; fmt.Sprint(asked) != fmt.Sprint(want) {
+		t.Errorf("listen calls = %q, want %q", asked, want)
+	}
+
+	asked = nil
+	if _, err := c.Listen(Config{Addr: "0.0.0.0:5432", Target: pgTarget, Listen: func(network, addr string) (net.Listener, error) {
+		asked = append(asked, addr)
+		return nil, errors.New("unreachable")
+	}}); !errors.Is(err, ErrInvalidListenAddress) || len(asked) != 0 {
+		t.Errorf("Listen(0.0.0.0) = %v after %d listen calls, want ErrInvalidListenAddress before any", err, len(asked))
+	}
+}

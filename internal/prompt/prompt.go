@@ -9,6 +9,8 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"slices"
+	"strconv"
 	"strings"
 
 	"github.com/alebak/dokploy-tunnel/internal/clierr"
@@ -23,11 +25,28 @@ type Request struct {
 	Label string
 }
 
+// Choice describes a selection of one or more options a command needs.
+type Choice struct {
+	// Label is the question shown above the options.
+	Label string
+	// Options are the choices, shown numbered from 1.
+	Options []string
+	// Missing is returned when no selection can be obtained, such as when
+	// prompting is not allowed. It names the arguments or flags that make
+	// the selection non-interactively and has code MissingInput.
+	Missing *clierr.Error
+}
+
 // Input obtains missing values for commands.
 type Input interface {
 	// Ask returns the value for req, or a *clierr.Error with code
 	// MissingInput when no value can be obtained.
 	Ask(req Request) (string, error)
+	// Choose returns the indexes of the options of c the user picks, in
+	// ascending order and without repeats, or c.Missing when nothing is
+	// picked. An answer that does not name options is an InvalidArgument
+	// *clierr.Error.
+	Choose(c Choice) ([]int, error)
 }
 
 // New returns the Input for the given policy. When allowed is false every
@@ -61,6 +80,10 @@ func (noInput) Ask(req Request) (string, error) {
 	return "", missing(req)
 }
 
+func (noInput) Choose(c Choice) ([]int, error) {
+	return nil, c.Missing
+}
+
 type lineInput struct {
 	in  *bufio.Reader
 	out io.Writer
@@ -79,4 +102,58 @@ func (l *lineInput) Ask(req Request) (string, error) {
 		return "", missing(req)
 	}
 	return answer, nil
+}
+
+func (l *lineInput) Choose(c Choice) ([]int, error) {
+	var b strings.Builder
+	fmt.Fprintf(&b, "%s:\n", c.Label)
+	for i, o := range c.Options {
+		fmt.Fprintf(&b, "  %d) %s\n", i+1, o)
+	}
+	b.WriteString("Numbers or ranges, separated by commas or spaces, or all: ")
+	if _, err := io.WriteString(l.out, b.String()); err != nil {
+		return nil, fmt.Errorf("writing prompt: %w", err)
+	}
+	line, err := l.in.ReadString('\n')
+	if err != nil && !errors.Is(err, io.EOF) {
+		return nil, fmt.Errorf("reading selection: %w", err)
+	}
+	answer := strings.TrimSpace(line)
+	if answer == "" {
+		return nil, c.Missing
+	}
+	return parseSelection(answer, len(c.Options))
+}
+
+// parseSelection reads an answer such as "1, 3-4" or "all" choosing among n
+// options numbered from 1, and returns the chosen indexes from 0.
+func parseSelection(answer string, n int) ([]int, error) {
+	if strings.EqualFold(answer, "all") {
+		all := make([]int, n)
+		for i := range all {
+			all[i] = i
+		}
+		return all, nil
+	}
+	invalid := func(tok string) error {
+		return clierr.Newf(clierr.InvalidArgument, "invalid selection %q", tok).
+			WithHint(fmt.Sprintf("pick numbers from 1 to %d, ranges such as 1-%d, or all", n, n))
+	}
+	var picked []int
+	for _, tok := range strings.FieldsFunc(answer, func(r rune) bool { return r == ',' || r == ' ' || r == '\t' }) {
+		from, to, isRange := strings.Cut(tok, "-")
+		if !isRange {
+			to = from
+		}
+		lo, err1 := strconv.Atoi(from)
+		hi, err2 := strconv.Atoi(to)
+		if err1 != nil || err2 != nil || lo < 1 || hi > n || lo > hi {
+			return nil, invalid(tok)
+		}
+		for i := lo; i <= hi; i++ {
+			picked = append(picked, i-1)
+		}
+	}
+	slices.Sort(picked)
+	return slices.Compact(picked), nil
 }

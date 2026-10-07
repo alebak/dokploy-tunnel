@@ -82,6 +82,9 @@ type Config struct {
 	// OnEvent, when not nil, is called for every Event. It is called from
 	// several goroutines at once and must not block for long.
 	OnEvent func(Event)
+	// Listen opens the listener on the validated Addr; nil means
+	// net.Listen. It exists for tests.
+	Listen func(network, addr string) (net.Listener, error)
 }
 
 // Forwarder listens on a local address and forwards every accepted TCP
@@ -114,7 +117,11 @@ func (c *Client) Listen(cfg Config) (*Forwarder, error) {
 	if cfg.Target.Port < 1 || cfg.Target.Port > 65535 {
 		return nil, fmt.Errorf("invalid target port %d", cfg.Target.Port)
 	}
-	ln, err := net.Listen("tcp", cfg.Addr)
+	listen := cfg.Listen
+	if listen == nil {
+		listen = net.Listen
+	}
+	ln, err := listen("tcp", cfg.Addr)
 	if err != nil {
 		return nil, fmt.Errorf("listening on %s: %w", cfg.Addr, err)
 	}
