@@ -1,5 +1,21 @@
 # Changelog
 
+## [0.2.0](https://github.com/alebak/dokploy-tunnel/compare/v0.1.0...v0.2.0) (2026-10-07)
+
+
+### Features
+
+* **addressing:** short hostnames from the Dokploy appName ([#82](https://github.com/alebak/dokploy-tunnel/issues/82)) ([061d0ea](https://github.com/alebak/dokploy-tunnel/commit/061d0ea917ba00215b82c9ec83353f47cea901be))
+* **cli:** add the tunnel client that forwards local connections to the companion ([#76](https://github.com/alebak/dokploy-tunnel/issues/76)) ([e82106d](https://github.com/alebak/dokploy-tunnel/commit/e82106ddd23e1b4a68a08a82c50452b07401760e))
+* **cli:** forward services through the companion with doktunnel forward ([#79](https://github.com/alebak/dokploy-tunnel/issues/79)) ([16fd7b6](https://github.com/alebak/dokploy-tunnel/commit/16fd7b6db11eb71e6a4aaa9278477f6d52dff4c9))
+* **cli:** report active forwards with doktunnel status ([#80](https://github.com/alebak/dokploy-tunnel/issues/80)) ([031bc8e](https://github.com/alebak/dokploy-tunnel/commit/031bc8ec0864cae3f6899f8ca7f9864ed93e2e6e))
+* **companion:** report a target's exposed ports at /v1/ports ([#75](https://github.com/alebak/dokploy-tunnel/issues/75)) ([49f4fb8](https://github.com/alebak/dokploy-tunnel/commit/49f4fb80a9b83d24571a0554b23207ed3f806fe3))
+
+
+### Bug Fixes
+
+* **devcontainer:** install the pinned tools into GOPATH/bin ([#78](https://github.com/alebak/dokploy-tunnel/issues/78)) ([f0c5bfa](https://github.com/alebak/dokploy-tunnel/commit/f0c5bfa3baa1c72e45bbf104960587f22ca3a85b))
+
 ## 0.1.0 (2026-10-06)
 
 
