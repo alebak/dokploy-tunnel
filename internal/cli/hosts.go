@@ -237,23 +237,37 @@ func malformedError(path string, err error) error {
 }
 
 func runHostsSync(env *Env, dryRun bool) error {
-	ctx := context.Background()
-	target := env.hostsTarget()
-	desired, err := env.desiredEntries()
+	out, _, err := env.syncHosts(context.Background(), dryRun)
 	if err != nil {
 		return err
 	}
+	if env.JSON {
+		return output.WriteJSON(env.Stdout, out)
+	}
+	return writeSync(env, out)
+}
+
+// syncHosts brings the doktunnel section of the hosts file, and on macOS the
+// lo0 aliases, in line with the address registry, elevating once and only
+// when something has to change; with dryRun it changes nothing. It returns
+// what changed and the entries the section must hold.
+func (e *Env) syncHosts(ctx context.Context, dryRun bool) (hostsSyncJSON, []hosts.Entry, error) {
+	target := e.hostsTarget()
+	desired, err := e.desiredEntries()
+	if err != nil {
+		return hostsSyncJSON{}, nil, err
+	}
 	content, f, current, err := readHosts(target.path)
 	if err != nil {
-		return err
+		return hostsSyncJSON{}, nil, err
 	}
 	next := f.WithEntries(desired)
 	hostsChanged := !bytes.Equal(next, content)
 
 	var missing []netip.Addr
 	if !target.override {
-		if missing, err = env.Loopback.Missing(ctx, entryIPs(desired)); err != nil {
-			return err
+		if missing, err = e.Loopback.Missing(ctx, entryIPs(desired)); err != nil {
+			return hostsSyncJSON{}, nil, err
 		}
 	}
 	out := hostsSyncJSON{
@@ -269,14 +283,11 @@ func runHostsSync(env *Env, dryRun bool) error {
 	}
 
 	if !dryRun && out.Changed {
-		if err := env.applySync(ctx, target, next, desired, hostsChanged, len(missing) > 0); err != nil {
-			return err
+		if err := e.applySync(ctx, target, next, desired, hostsChanged, len(missing) > 0); err != nil {
+			return hostsSyncJSON{}, nil, err
 		}
 	}
-	if env.JSON {
-		return output.WriteJSON(env.Stdout, out)
-	}
-	return writeSync(env, out)
+	return out, desired, nil
 }
 
 // applySync writes next to the hosts file directly when the user may, and

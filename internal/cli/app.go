@@ -7,10 +7,13 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"net"
 	"net/url"
 	"os"
+	"os/signal"
 	"strconv"
 	"strings"
+	"syscall"
 	"text/tabwriter"
 
 	"github.com/alebak/dokploy-tunnel/internal/clierr"
@@ -64,6 +67,12 @@ type App struct {
 	// ProbeCompanion checks that a doktunnel companion answers at a URL;
 	// nil means an HTTP health check.
 	ProbeCompanion func(ctx context.Context, u *url.URL) error
+	// NotifyContext returns a copy of parent that is cancelled when the
+	// process is asked to stop; nil means SIGINT or SIGTERM, which Go also
+	// delivers for Ctrl+C, Ctrl+Break and closing the console on Windows.
+	NotifyContext func(parent context.Context) (context.Context, context.CancelFunc)
+	// Listen opens a TCP listener for a forward; nil means net.Listen.
+	Listen func(network, addr string) (net.Listener, error)
 }
 
 // Run executes the command selected by args (without the program name) and
@@ -159,6 +168,8 @@ func (a *App) env(g Globals) *Env {
 		WriteHosts:   a.WriteHosts,
 
 		ProbeCompanion: a.ProbeCompanion,
+		NotifyContext:  a.NotifyContext,
+		Listen:         a.Listen,
 	}
 	env.NoInput = env.NoInput || !a.StdinIsTerminal
 	env.Input = prompt.New(!env.NoInput, stdin, a.Stderr)
@@ -179,6 +190,11 @@ func (a *App) env(g Globals) *Env {
 	}
 	if env.WriteHosts == nil {
 		env.WriteHosts = hosts.Write
+	}
+	if env.NotifyContext == nil {
+		env.NotifyContext = func(parent context.Context) (context.Context, context.CancelFunc) {
+			return signal.NotifyContext(parent, os.Interrupt, syscall.SIGTERM)
+		}
 	}
 	return env
 }

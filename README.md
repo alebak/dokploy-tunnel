@@ -9,7 +9,7 @@
 
 ## Status
 
-**Early development.** The release pipeline is in place, but the binaries do not implement tunneling yet. `doktunnel` can register Dokploy panels as [contexts](#contexts), [list their services](#services) and manage the [hosts file section](#hostnames); its other commands report `not_implemented`. `doktunnel-companion` serves the tunnel endpoint and authorizes requests, but cannot reach services yet (see [Companion](#companion-server)). Expect breaking changes before 1.0.0.
+**Early development.** `doktunnel` can register Dokploy panels as [contexts](#contexts), [list their services](#services), [forward them](#forward) through the companion, and manage the [hosts file section](#hostnames); `status` still reports `not_implemented`. `doktunnel-companion` serves the tunnel endpoint, authorizes requests and reaches services through repeater containers (see [Companion](#companion-server)). Forwarding has not been verified end to end against a real Dokploy server yet. Expect breaking changes before 1.0.0.
 
 ## Install
 
@@ -61,7 +61,7 @@ The same two binaries are also attached to each release as `doktunnel-companion_
 
 ## Usage
 
-`doktunnel --help` lists the command groups: `context`, `services`, `forward`, `status`, and `hosts`. Only `context`, `services` and `hosts` are implemented so far; the others exit with the `not_implemented` error. `doktunnel <command> --help` shows a command's flags, and `doktunnel --version` prints the build version.
+`doktunnel --help` lists the command groups: `context`, `services`, `forward`, `status`, and `hosts`. `status` is not implemented yet and exits with the `not_implemented` error. `doktunnel <command> --help` shows a command's flags, and `doktunnel --version` prints the build version.
 
 ### Contexts
 
@@ -159,6 +159,42 @@ With `--json`, the result is a stable tree:
 
 Lists are always present, possibly empty. New fields may be added; existing fields keep their meaning.
 
+### Forward
+
+`doktunnel forward` forwards one or more services to their [hostnames](#hostnames) and real ports, and runs in the foreground until you press Ctrl+C:
+
+```console
+$ doktunnel forward myapp/postgres main-db
+Updated /etc/hosts: 2 added, 0 removed.
+postgres.myapp.shop.acme.prod.internal (127.77.0.1:5432) → myapp/postgres
+main-db.shop.acme.prod.internal (127.77.0.2:5432) → main-db
+Forwarding; press Ctrl+C to stop.
+
+$ psql -h postgres.myapp.shop.acme.prod.internal -U app   # in another terminal
+```
+
+Name services as [`services`](#services) lists them: by name, as `<compose>/<service>` for a service inside a compose stack, or by ID. IDs always win; a name shared by several services fails with `invalid_argument` listing them, so pass the ID instead. A compose stack itself is not forwardable, only the services inside it. `--project <name or ID>` limits the search to one project, `--all` forwards every service in scope, and with no service and no `--all` doktunnel asks which ones to forward (with `--no-input`, it fails with `missing_input`).
+
+**Ports.** Each service keeps its own port on its own address, so two databases can both use 5432. The port is, in order:
+
+1. `--port <n>`, which only applies when a single service is selected;
+2. the fixed port of a Dokploy database (postgres 5432, mysql and mariadb 3306, mongo 27017, redis 6379, libsql 8080);
+3. the ports the companion reports for the container, from its image's exposed ports (`GET /v1/ports`).
+
+doktunnel never guesses: a container that exposes no port fails with `missing_input` naming `--port`, and one that exposes several (such as RabbitMQ's 5672 and 15672) fails the same way unless you pass `--all-ports` to forward each of them. With `--all`, every selected service must resolve; narrow the selection or name the services otherwise.
+
+**Addresses and hosts file.** Each service is leased its address in the [address registry](#hostnames), its hostname is recorded, and the hosts file is synced exactly as `doktunnel hosts sync` does: it asks for administrator privileges once, and only when something changed. On macOS the same step adds the `lo0` aliases, which are lost on reboot. With `--no-input` and a change to make, `forward` fails with `elevation_required`, and the hint is the command to run first. Listeners are bound to the leased address and port only, never `0.0.0.0`; if any of them cannot be bound (for example, the service is already forwarded by another `doktunnel forward`), nothing is forwarded.
+
+**Connections.** Every local connection opens its own tunnel through the context's [companion](#companion-url). Connection events go to stderr, one line each. Ctrl+C or `SIGTERM` (on Windows, Ctrl+C, Ctrl+Break or closing the console) closes every open tunnel, so the companion removes its repeaters once their grace period ends, and exits with code 0.
+
+With `--json`, `forward` prints one object once every forward listens, and nothing else afterwards:
+
+```json
+{"context":"prod","pid":4242,"started_at":"2026-10-06T12:00:00Z","companion_url":"https://dokploy.example.com/doktunnel","forwards":[{"target":{"type":"compose_service","id":"cmp_myapp/postgres","name":"myapp/postgres"},"hostname":"postgres.myapp.shop.acme.prod.internal","ip":"127.77.0.1","port":5432}]}
+```
+
+`target.type` is the Dokploy service type or `compose_service`, and `target.id` and `target.name` are as `services` reports them. While it runs, each `forward` process records the same data in `forwards/<pid>.json` in the doktunnel state directory (next to the address registry), which `doktunnel status` will list; the file is removed on exit.
+
 ### Hostnames
 
 Every forwarded service gets its own loopback address from `127.77.0.0/16` and a stable hostname under `.internal`, a top-level domain reserved for private use:
@@ -190,7 +226,7 @@ doktunnel hosts list             # the entries currently in the section
 doktunnel hosts clean            # remove the section, nothing else
 ```
 
-`hosts sync` builds the section from the services registered in the address registry and writes it only when it differs from the file; services are registered when you forward them. `hosts clean` also repairs malformed markers: a begin and end pair is removed with everything between them, and a marker without a partner is removed alone.
+`hosts sync` builds the section from the services registered in the address registry and writes it only when it differs from the file; services are registered when you forward them, and `forward` runs the same sync itself. `hosts clean` also repairs malformed markers: a begin and end pair is removed with everything between them, and a marker without a partner is removed alone.
 
 With `--json`, `hosts sync` prints `{"hosts_file","dry_run","changed","added","removed","aliases"}`, `hosts list` prints `{"hosts_file","entries"}` and `hosts clean` prints `{"hosts_file","changed","removed"}`, where every entry is `{"ip","hostname"}` and `aliases` lists the macOS loopback aliases added (or, with `--dry-run`, to add):
 

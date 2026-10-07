@@ -50,20 +50,20 @@ func TestClient_Ports_Success(t *testing.T) {
 	}
 	// A trailing slash on the companion URL must not double the slash.
 	c := newTestClient(t, fc.url()+"/")
-	target := tunnel.Target{ServiceType: dokploy.ServiceCompose, ServiceID: "cmp_app", ComposeService: "rabbit", Port: 9}
+	ref := tunnel.TargetRef{ServiceType: dokploy.ServiceCompose, ServiceID: "cmp_app", ComposeService: "rabbit", ServerID: "srv_edge"}
 
-	got, err := c.Ports(context.Background(), target, "srv_edge")
+	got, err := c.Ports(context.Background(), ref)
 	if err != nil {
 		t.Fatalf("Ports() error = %v", err)
 	}
-	want := []Port{{5672, "tcp"}, {15672, "tcp"}}
+	want := []tunnel.Port{{Port: 5672, Protocol: "tcp"}, {Port: 15672, Protocol: "tcp"}}
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("Ports() = %v, want %v (sorted by port)", got, want)
 	}
 
 	r := fc.lastRequest()
-	if !hasPrefixPath(r, portsPath) {
-		t.Errorf("request path = %q, want %q", r.URL.Path, testPrefix+portsPath)
+	if !hasPrefixPath(r, tunnel.PortsPath) {
+		t.Errorf("request path = %q, want %q", r.URL.Path, testPrefix+tunnel.PortsPath)
 	}
 	if r.Header.Get(tunnel.HeaderAPIKey) != testKey {
 		t.Errorf("x-api-key = %q, want the API key", r.Header.Get(tunnel.HeaderAPIKey))
@@ -88,7 +88,7 @@ func TestClient_Ports_EmptyListIsNotNil(t *testing.T) {
 	fc.ports = func(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, `{"ports":[]}`)
 	}
-	got, err := newTestClient(t, fc.url()).Ports(context.Background(), pgTarget, "")
+	got, err := newTestClient(t, fc.url()).Ports(context.Background(), pgRef)
 	if err != nil || got == nil || len(got) != 0 {
 		t.Errorf("Ports() = %#v, %v; want an empty non-nil list", got, err)
 	}
@@ -127,7 +127,7 @@ func TestClient_Ports_Errors(t *testing.T) {
 			fc := newFakeCompanion(t)
 			fc.ports = func(w http.ResponseWriter, r *http.Request) { writeJSON(w, tt.status, tt.body) }
 
-			_, err := newTestClient(t, fc.url()).Ports(context.Background(), pgTarget, "")
+			_, err := newTestClient(t, fc.url()).Ports(context.Background(), pgRef)
 			var ce *CompanionError
 			if !errors.As(err, &ce) {
 				t.Fatalf("Ports() error = %v, want a *CompanionError", err)
@@ -155,7 +155,7 @@ func TestClient_Ports_RejectsInvalidAnswer(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			fc := newFakeCompanion(t)
 			fc.ports = func(w http.ResponseWriter, r *http.Request) { writeJSON(w, http.StatusOK, body) }
-			_, err := newTestClient(t, fc.url()).Ports(context.Background(), pgTarget, "")
+			_, err := newTestClient(t, fc.url()).Ports(context.Background(), pgRef)
 			if !errors.Is(err, ErrCompanionUnreachable) {
 				t.Errorf("Ports() error = %v, want ErrCompanionUnreachable", err)
 			}
@@ -167,7 +167,7 @@ func TestClient_Ports_UnreachableCompanion(t *testing.T) {
 	fc := newFakeCompanion(t)
 	u := fc.url()
 	fc.srv.Close()
-	_, err := newTestClient(t, u).Ports(context.Background(), pgTarget, "")
+	_, err := newTestClient(t, u).Ports(context.Background(), pgRef)
 	if !errors.Is(err, ErrCompanionUnreachable) {
 		t.Fatalf("Ports() error = %v, want ErrCompanionUnreachable", err)
 	}
@@ -181,7 +181,7 @@ func TestClient_Ports_DoesNotFollowRedirects(t *testing.T) {
 	fc.ports = func(w http.ResponseWriter, r *http.Request) {
 		http.Redirect(w, r, "https://elsewhere.example.com/steal", http.StatusFound)
 	}
-	_, err := newTestClient(t, fc.url()).Ports(context.Background(), pgTarget, "")
+	_, err := newTestClient(t, fc.url()).Ports(context.Background(), pgRef)
 	var ce *CompanionError
 	if !errors.As(err, &ce) || ce.Status != http.StatusFound {
 		t.Errorf("Ports() error = %v, want a *CompanionError with HTTP 302", err)

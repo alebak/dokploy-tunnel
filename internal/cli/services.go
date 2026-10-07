@@ -6,11 +6,13 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"net/url"
 	"strconv"
 	"sync"
 	"text/tabwriter"
 
 	"github.com/alebak/dokploy-tunnel/internal/clierr"
+	"github.com/alebak/dokploy-tunnel/internal/config"
 	"github.com/alebak/dokploy-tunnel/internal/dokploy"
 	"github.com/alebak/dokploy-tunnel/internal/output"
 )
@@ -106,35 +108,71 @@ func newServicesCommand() *Command {
 }
 
 func runServices(env *Env, project string) error {
-	cctx, key, err := env.ResolveContext()
+	cat, err := env.loadCatalog(context.Background(), project)
 	if err != nil {
 		return err
 	}
+	out := toServicesJSON(cat.context.Name, cat.projects, cat.inside, cat.warnings)
+	if env.JSON {
+		// Warnings are part of each service, and stderr stays silent.
+		return output.WriteJSON(env.Stdout, out)
+	}
+	writeServiceWarnings(env.Stderr, out)
+	if len(out.Projects) == 0 {
+		_, err := fmt.Fprintf(env.Stderr, "No projects are visible to the API key of context %q.\n", cat.context.Name)
+		return err
+	}
+	return writeServices(env.Stdout, out)
+}
+
+// catalog is what the API key of a context can see: its projects with every
+// name and status that could be read, and the services inside each compose
+// stack.
+type catalog struct {
+	context config.Context
+	// key is the context's API key.
+	key string
+	// base is the context's panel URL.
+	base     *url.URL
+	projects []dokploy.Project
+	// inside holds the services inside each compose stack, keyed by
+	// compose ID.
+	inside map[string][]string
+	// warnings explain what could not be read, keyed by detailKey.
+	warnings map[string]string
+}
+
+// loadCatalog reads the catalog of the resolved context, keeping only the
+// projects whose name or ID is project when it is not empty.
+func (e *Env) loadCatalog(ctx context.Context, project string) (*catalog, error) {
+	cctx, key, err := e.ResolveContext()
+	if err != nil {
+		return nil, err
+	}
 	base, err := dokploy.ParseBaseURL(cctx.URL)
 	if err != nil {
-		return clierr.Newf(clierr.Internal, "context %q: %v", cctx.Name, err).
+		return nil, clierr.Newf(clierr.Internal, "context %q: %v", cctx.Name, err).
 			WithHint(fmt.Sprintf("run 'doktunnel context remove %s' and 'doktunnel context add' again", cctx.Name))
 	}
-	ctx := context.Background()
-	api := env.NewAPI(base, key)
+	api := e.NewAPI(base, key)
 	projects, err := api.Projects(ctx)
 	if err != nil {
-		return apiError(cctx.URL, err)
+		return nil, apiError(cctx.URL, err)
 	}
 	if project != "" {
 		if projects = filterProjects(projects, project); len(projects) == 0 {
-			return clierr.Newf(clierr.NotFound, "no project named %q or with that ID in context %q", project, cctx.Name).
+			return nil, clierr.Newf(clierr.NotFound, "no project named %q or with that ID in context %q", project, cctx.Name).
 				WithHint("run 'doktunnel services' to list the projects the API key can see")
 		}
 	}
 
 	warnings, err := fillServiceDetails(ctx, api, projects)
 	if err != nil {
-		return fmt.Errorf("reading service details: %w", err)
+		return nil, fmt.Errorf("reading service details: %w", err)
 	}
 	inside, composeWarnings, err := listComposeServices(ctx, api, projects)
 	if err != nil {
-		return fmt.Errorf("reading compose services: %w", err)
+		return nil, fmt.Errorf("reading compose services: %w", err)
 	}
 	for k, w := range composeWarnings {
 		if warnings[k] != "" {
@@ -142,18 +180,7 @@ func runServices(env *Env, project string) error {
 		}
 		warnings[k] = w
 	}
-
-	out := toServicesJSON(cctx.Name, projects, inside, warnings)
-	if env.JSON {
-		// Warnings are part of each service, and stderr stays silent.
-		return output.WriteJSON(env.Stdout, out)
-	}
-	writeServiceWarnings(env.Stderr, out)
-	if len(out.Projects) == 0 {
-		_, err := fmt.Fprintf(env.Stderr, "No projects are visible to the API key of context %q.\n", cctx.Name)
-		return err
-	}
-	return writeServices(env.Stdout, out)
+	return &catalog{context: cctx, key: key, base: base, projects: projects, inside: inside, warnings: warnings}, nil
 }
 
 // filterProjects returns the projects whose ID or name is nameOrID. Dokploy

@@ -10,11 +10,7 @@ func NewRoot() *Command {
 		Subcommands: []*Command{
 			newContextCommand(),
 			newServicesCommand(),
-			{
-				Name:    "forward",
-				Summary: "Forward a Dokploy service to a stable local hostname and port",
-				Run:     notImplemented("forward"),
-			},
+			newForwardCommand(),
 			{
 				Name:    "status",
 				Summary: "Show active forwards",

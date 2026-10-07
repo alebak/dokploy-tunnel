@@ -24,6 +24,9 @@ const (
 // pgTarget is the target most tests forward to.
 var pgTarget = tunnel.Target{ServiceType: dokploy.ServicePostgres, ServiceID: "pg_main", Port: 5432}
 
+// pgRef names the service of pgTarget, as a ports request does.
+var pgRef = tunnel.TargetRef{ServiceType: dokploy.ServicePostgres, ServiceID: "pg_main"}
+
 // fakeCompanion is a loopback companion. Its tunnel endpoint rejects
 // requests whose serviceId has an entry in reject, and otherwise hands the
 // accepted WebSocket to stream.
@@ -59,7 +62,7 @@ func newFakeCompanion(t *testing.T) *fakeCompanion {
 	fc.stream = fc.echo
 	mux := http.NewServeMux()
 	mux.HandleFunc(testPrefix+tunnel.Path, fc.handleTunnel)
-	mux.HandleFunc(testPrefix+portsPath, func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc(testPrefix+tunnel.PortsPath, func(w http.ResponseWriter, r *http.Request) {
 		fc.record(r)
 		fc.ports(w, r)
 	})
