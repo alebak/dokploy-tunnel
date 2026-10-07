@@ -23,6 +23,7 @@ import (
 	"github.com/alebak/dokploy-tunnel/internal/keyring"
 	"github.com/alebak/dokploy-tunnel/internal/output"
 	"github.com/alebak/dokploy-tunnel/internal/prompt"
+	"github.com/alebak/dokploy-tunnel/internal/runstate"
 	"github.com/alebak/dokploy-tunnel/internal/version"
 )
 
@@ -73,6 +74,9 @@ type App struct {
 	NotifyContext func(parent context.Context) (context.Context, context.CancelFunc)
 	// Listen opens a TCP listener for a forward; nil means net.Listen.
 	Listen func(network, addr string) (net.Listener, error)
+	// ProcessAlive reports whether a process is running; nil means
+	// runstate.Alive.
+	ProcessAlive func(pid int) bool
 }
 
 // Run executes the command selected by args (without the program name) and
@@ -170,6 +174,7 @@ func (a *App) env(g Globals) *Env {
 		ProbeCompanion: a.ProbeCompanion,
 		NotifyContext:  a.NotifyContext,
 		Listen:         a.Listen,
+		ProcessAlive:   a.ProcessAlive,
 	}
 	env.NoInput = env.NoInput || !a.StdinIsTerminal
 	env.Input = prompt.New(!env.NoInput, stdin, a.Stderr)
@@ -190,6 +195,9 @@ func (a *App) env(g Globals) *Env {
 	}
 	if env.WriteHosts == nil {
 		env.WriteHosts = hosts.Write
+	}
+	if env.ProcessAlive == nil {
+		env.ProcessAlive = runstate.Alive
 	}
 	if env.NotifyContext == nil {
 		env.NotifyContext = func(parent context.Context) (context.Context, context.CancelFunc) {

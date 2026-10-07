@@ -60,17 +60,19 @@ func TestRun_SkillIgnoresOutputFlags(t *testing.T) {
 	}
 }
 
+func noopRun(*Env, []string) error { return nil }
+
 func TestRun_SkillFollowsCommandTree(t *testing.T) {
 	root := NewRoot()
 	root.Subcommands = append(root.Subcommands, &Command{
 		Name:    "widget",
 		Summary: "Manage widgets",
 		Subcommands: []*Command{
-			{Name: "spin", Summary: "Spin a widget", Description: "Spins until stopped.", Run: notImplemented("spin")},
+			{Name: "spin", Summary: "Spin a widget", Description: "Spins until stopped.", Run: noopRun},
 			{
 				Name: "paint", Summary: "Paint a widget", Args: "<name>",
 				Flags: func(fs *flag.FlagSet) { fs.String("color", "", "paint `color`") },
-				Run:   notImplemented("paint"),
+				Run:   noopRun,
 			},
 		},
 	})

@@ -93,39 +93,37 @@ func TestRun_CommandHelp(t *testing.T) {
 	}
 }
 
-func TestRun_UnimplementedCommandsReturnNotImplemented(t *testing.T) {
-	for _, name := range []string{"status"} {
-		variants := [][]string{
-			{name, "--json", "--no-input"},
-			{"--json", name, "--context", "prod"},
-			{name, "some-arg", "--json"},
-		}
-		for _, args := range variants {
-			t.Run(strings.Join(args, " "), func(t *testing.T) {
-				r := run(t, NewRoot(), "", false, args...)
-				if want := clierr.NotImplemented.ExitCode(); r.exit != want {
-					t.Errorf("exit = %d, want %d", r.exit, want)
-				}
-				if r.stderr != "" {
-					t.Errorf("stderr = %q, want empty in JSON mode", r.stderr)
-				}
-				if e := decodeError(t, r.stdout); e.Code != clierr.NotImplemented || e.Message == "" {
-					t.Errorf("error = %+v, want code %q with a message", e, clierr.NotImplemented)
-				}
-			})
-		}
+func TestRun_JSONErrorGoesToStdout(t *testing.T) {
+	variants := [][]string{
+		{"status", "extra", "--json", "--no-input"},
+		{"--json", "status", "--context", "prod", "extra"},
+		{"status", "extra", "--json"},
+	}
+	for _, args := range variants {
+		t.Run(strings.Join(args, " "), func(t *testing.T) {
+			r := run(t, NewRoot(), "", false, args...)
+			if want := clierr.InvalidArgument.ExitCode(); r.exit != want {
+				t.Errorf("exit = %d, want %d", r.exit, want)
+			}
+			if r.stderr != "" {
+				t.Errorf("stderr = %q, want empty in JSON mode", r.stderr)
+			}
+			if e := decodeError(t, r.stdout); e.Code != clierr.InvalidArgument || e.Message == "" {
+				t.Errorf("error = %+v, want code %q with a message", e, clierr.InvalidArgument)
+			}
+		})
 	}
 }
 
 func TestRun_HumanErrorGoesToStderr(t *testing.T) {
-	r := run(t, NewRoot(), "", true, "status")
-	if want := clierr.NotImplemented.ExitCode(); r.exit != want {
+	r := run(t, NewRoot(), "", true, "status", "extra")
+	if want := clierr.InvalidArgument.ExitCode(); r.exit != want {
 		t.Errorf("exit = %d, want %d", r.exit, want)
 	}
 	if r.stdout != "" {
 		t.Errorf("stdout = %q, want empty", r.stdout)
 	}
-	if !strings.Contains(r.stderr, string(clierr.NotImplemented)) {
+	if !strings.Contains(r.stderr, string(clierr.InvalidArgument)) {
 		t.Errorf("stderr %q does not show the error code", r.stderr)
 	}
 }

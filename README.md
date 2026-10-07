@@ -9,7 +9,7 @@
 
 ## Status
 
-**Early development.** `doktunnel` can register Dokploy panels as [contexts](#contexts), [list their services](#services), [forward them](#forward) through the companion, and manage the [hosts file section](#hostnames); `status` still reports `not_implemented`. `doktunnel-companion` serves the tunnel endpoint, authorizes requests and reaches services through repeater containers (see [Companion](#companion-server)). Forwarding has not been verified end to end against a real Dokploy server yet. Expect breaking changes before 1.0.0.
+**Early development.** `doktunnel` can register Dokploy panels as [contexts](#contexts), [list their services](#services), [forward them](#forward) through the companion, [show the active forwards](#status), and manage the [hosts file section](#hostnames). `doktunnel-companion` serves the tunnel endpoint, authorizes requests and reaches services through repeater containers (see [Companion](#companion-server)). Forwarding has not been verified end to end against a real Dokploy server yet. Expect breaking changes before 1.0.0.
 
 ## Install
 
@@ -61,7 +61,7 @@ The same two binaries are also attached to each release as `doktunnel-companion_
 
 ## Usage
 
-`doktunnel --help` lists the command groups: `context`, `services`, `forward`, `status`, and `hosts`. `status` is not implemented yet and exits with the `not_implemented` error. `doktunnel <command> --help` shows a command's flags, and `doktunnel --version` prints the build version.
+`doktunnel --help` lists the command groups: `context`, `services`, `forward`, `status`, and `hosts`. `doktunnel <command> --help` shows a command's flags, and `doktunnel --version` prints the build version.
 
 ### Contexts
 
@@ -193,7 +193,37 @@ With `--json`, `forward` prints one object once every forward listens, and nothi
 {"context":"prod","pid":4242,"started_at":"2026-10-06T12:00:00Z","companion_url":"https://dokploy.example.com/doktunnel","forwards":[{"target":{"type":"compose_service","id":"cmp_myapp/postgres","name":"myapp/postgres"},"hostname":"postgres.myapp.shop.acme.prod.internal","ip":"127.77.0.1","port":5432}]}
 ```
 
-`target.type` is the Dokploy service type or `compose_service`, and `target.id` and `target.name` are as `services` reports them. While it runs, each `forward` process records the same data in `forwards/<pid>.json` in the doktunnel state directory (next to the address registry), which `doktunnel status` will list; the file is removed on exit.
+`target.type` is the Dokploy service type or `compose_service`, and `target.id` and `target.name` are as `services` reports them. While it runs, each `forward` process records the same data in `forwards/<pid>.json` in the doktunnel state directory (next to the address registry), which [`doktunnel status`](#status) lists; the file is removed on exit.
+
+### Status
+
+`doktunnel status` lists the forwards of every running `doktunnel forward` process, from any terminal:
+
+```console
+$ doktunnel status
+CONTEXT  HOSTNAME                                ADDRESS          TARGET          PID   SINCE
+prod     main-db.shop.acme.prod.internal         127.77.0.2:5432  main-db         4242  2026-10-06 07:00:00
+prod     postgres.myapp.shop.acme.prod.internal  127.77.0.1:5432  myapp/postgres  4242  2026-10-06 07:00:00
+```
+
+Rows are sorted by context, hostname and port, and `SINCE` is when the process started forwarding, in local time. With no running forward it prints `No active forwards.` to stderr. `status` shows every context unless `--context <name>` is given explicitly; the current context does not filter it. It needs no network access and no configured context.
+
+It reads the files `forward` processes keep in `forwards/<pid>.json` in the doktunnel state directory. A file whose process is no longer running (for example, one that was killed) is stale and removed. A file of a running process that cannot be read, such as one written by another doktunnel version, is left in place and reported as a warning on stderr; it does not fail the command. doktunnel cannot portably tell a killed `forward` process from an unrelated program that later got the same PID, so such a stale file is listed until that program exits.
+
+With `--json`:
+
+```json
+{"forwards":[{"pid":4242,"started_at":"2026-10-06T12:00:00Z","context":"prod","companion_url":"https://dokploy.example.com/doktunnel","target":{"type":"postgres","id":"pg_main","name":"main-db"},"hostname":"main-db.shop.acme.prod.internal","ip":"127.77.0.2","port":5432}],"warnings":[]}
+```
+
+| Field | Meaning |
+|-------|---------|
+| `forwards[].pid`, `.started_at` | The `forward` process and when it started forwarding (RFC 3339) |
+| `forwards[].context`, `.companion_url` | The context and companion the process uses |
+| `forwards[].target`, `.hostname`, `.ip`, `.port` | The forward, as `forward --json` prints it |
+| `warnings` | Files that could not be read or removed, one string each |
+
+Both lists are always present, possibly empty. New fields may be added; existing fields keep their meaning.
 
 ### Hostnames
 
