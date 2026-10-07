@@ -1,4 +1,4 @@
-# dokploy-tunnel
+# Doktunnel (dokploy-tunnel)
 
 > **Community project, not affiliated with Dokploy.** "Dokploy" is used only to describe compatibility.
 
@@ -454,7 +454,7 @@ A disproved assumption shows up as a *Platform finding* warning on the run and i
 
 ## Contributing
 
-See [CONTRIBUTING.md](CONTRIBUTING.md). Report vulnerabilities privately as described in [SECURITY.md](SECURITY.md). Everyone taking part follows the [Code of Conduct](CODE_OF_CONDUCT.md).
+See [CONTRIBUTING.md](CONTRIBUTING.md). Report vulnerabilities privately as described in [SECURITY.md](SECURITY.md).
 
 ## License
 

@@ -2,8 +2,6 @@
 
 Thanks for your interest in contributing. dokploy-tunnel is a community project and is not affiliated with Dokploy.
 
-By taking part you agree to follow the [Code of Conduct](CODE_OF_CONDUCT.md).
-
 ## Before you start
 
 | You want to | Do this |
