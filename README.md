@@ -187,6 +187,8 @@ doktunnel never guesses: a container that exposes no port fails with `missing_in
 
 **Connections.** Every local connection opens its own tunnel through the context's [companion](#companion-url). Connection events go to stderr, one line each. Ctrl+C or `SIGTERM` (on Windows, Ctrl+C, Ctrl+Break or closing the console) closes every open tunnel, so the companion removes its repeaters once their grace period ends, and exits with code 0.
 
+**Stopping.** On the way out, `forward` also removes its hostnames from the hosts file, except those another running `forward` still uses, so the section always lists the services being forwarded. If the hosts file needs administrator privileges, it asks for them again, as it did on start (on Linux and macOS, `sudo` may still remember your password). With `--no-input` or without a terminal it does not ask; if it may not, you refuse, or nobody answers within a minute, the entries stay and a warning tells you to run `doktunnel hosts sync` (which removes the names of stopped forwards) or `doktunnel hosts clean`. Either way the exit code stays 0. Leases are kept, so a service gets the same address and hostname the next time, and so are the macOS `lo0` aliases.
+
 With `--json`, `forward` prints one object once every forward listens, and nothing else afterwards:
 
 ```json
@@ -240,7 +242,7 @@ The **appName** is the name Dokploy deploys an application, database or compose 
 
 **Collisions.** appNames are unique within one Dokploy instance, but two contexts (two panels) can both hold one, and two names can differ only in characters that are turned into hyphens. doktunnel never maps two services to one name: the service registered first keeps the plain hostname, and a later one gets its context as an extra label, as in `postgres.acme-billing-x1y2z3.acme-staging.internal`. When that is taken too, its first label also gets a suffix of 6 hex characters derived from its Dokploy instance, organization and service ID, as in `postgres-1a2b3c.acme-billing-x1y2z3.acme-staging.internal` (longer when that is taken as well). The result is deterministic, and an existing hostname never changes when a newer service with the same name appears. doktunnel never uses names other software resolves under `.internal`, such as `host.docker.internal` or `metadata.google.internal`, nor any name below `docker.internal`, `containers.internal`, `google.internal`, `lima.internal`, `orb.internal` or `rancher-desktop.internal`; such a name is disambiguated the same way.
 
-**Upgrading from hostnames built from display names.** doktunnel versions before this one named services `<service>.<project>.<org>.<context>.internal`. Upgrading keeps every service's address; the next `forward` of a service records its appName, and the sync it runs replaces the old name in the hosts file. `hosts sync` drops old names of services that have not been forwarded since.
+**Upgrading from hostnames built from display names.** doktunnel versions before this one named services `<service>.<project>.<org>.<context>.internal`. Upgrading keeps every service's address; the next `forward` of a service records its appName, and the sync it runs replaces the old names in the hosts file with the names of the running forwards; a plain `hosts sync` does the same.
 
 **The hosts file section.** doktunnel writes the hostnames to the system hosts file (`/etc/hosts` on Linux and macOS, `%SystemRoot%\System32\drivers\etc\hosts` on Windows) inside one marked block:
 
@@ -260,7 +262,7 @@ doktunnel hosts list             # the entries currently in the section
 doktunnel hosts clean            # remove the section, nothing else
 ```
 
-`hosts sync` builds the section from the services registered in the address registry and writes it only when it differs from the file; services are registered when you forward them, and `forward` runs the same sync itself. `hosts clean` also repairs malformed markers: a begin and end pair is removed with everything between them, and a marker without a partner is removed alone.
+`hosts sync` builds the section from the forwards running now: it holds the hostnames of the services every running `doktunnel forward` process listens for, as recorded in their `forwards/<pid>.json` files, and nothing else, so names of stopped forwards are removed, and with no forward running the section is removed too. It writes the file only when it differs. `forward` runs the same sync when it starts and when it stops. A `forward` process that was killed cannot remove its names; the next sync does. A state file of a running process that cannot be read (written by another doktunnel version) keeps no names. `hosts clean` also repairs malformed markers: a begin and end pair is removed with everything between them, and a marker without a partner is removed alone.
 
 With `--json`, `hosts sync` prints `{"hosts_file","dry_run","changed","added","removed","aliases"}`, `hosts list` prints `{"hosts_file","entries"}` and `hosts clean` prints `{"hosts_file","changed","removed"}`, where every entry is `{"ip","hostname"}` and `aliases` lists the macOS loopback aliases added (or, with `--dry-run`, to add):
 

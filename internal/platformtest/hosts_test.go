@@ -26,6 +26,7 @@ import (
 	"github.com/alebak/dokploy-tunnel/internal/hostname"
 	"github.com/alebak/dokploy-tunnel/internal/hosts"
 	"github.com/alebak/dokploy-tunnel/internal/registry"
+	"github.com/alebak/dokploy-tunnel/internal/runstate"
 )
 
 // Unrelated lines the round trip puts around the doktunnel block; they must
@@ -195,8 +196,10 @@ func cliEnv(state string) []string {
 	return append(env, "XDG_STATE_HOME="+state)
 }
 
-// seedRegistry leases two named services the way forward will and returns
-// the entries "hosts sync" must write for them.
+// seedRegistry leases two named services the way forward will, records
+// this test process as the forward process running both, since "hosts sync"
+// writes only the hostnames of running forwards, and returns the entries it
+// must write for them.
 func seedRegistry(t *testing.T, path string) []hosts.Entry {
 	t.Helper()
 	reg, err := registry.Open(path)
@@ -229,6 +232,15 @@ func seedRegistry(t *testing.T, path string) []hosts.Entry {
 	}
 	if len(want) != len(services) {
 		t.Fatalf("seeded %d services, got %d entries", len(services), len(want))
+	}
+	running := runstate.Process{PID: os.Getpid(), StartedAt: time.Now().UTC(), Context: "ci", CompanionURL: "https://dokploy.example.com/doktunnel"}
+	for _, e := range want {
+		running.Forwards = append(running.Forwards, runstate.Forward{
+			Target: runstate.Target{Type: "postgres", ID: "seed", Name: e.Hostname}, Hostname: e.Hostname, IP: e.IP, Port: 5432,
+		})
+	}
+	if _, err := runstate.Write(runstate.Dir(filepath.Dir(path)), running); err != nil {
+		t.Fatal(err)
 	}
 	return want
 }

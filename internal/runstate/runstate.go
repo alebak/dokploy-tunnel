@@ -3,7 +3,8 @@
 // can list them.
 //
 // Every forward process writes one file, <dir>/<pid>.json, where dir is
-// Dir of the doktunnel state directory, and removes it when it exits. A
+// Dir of the doktunnel state directory, and removes it when it exits. The
+// files also decide which hostnames "doktunnel hosts sync" writes. A
 // process that is killed cannot remove its file, so readers must check that
 // the PID is still alive and treat files of dead processes as stale.
 package runstate
@@ -45,7 +46,8 @@ type Process struct {
 	Version int `json:"version"`
 	// PID is the process ID; the file is named after it.
 	PID int `json:"pid"`
-	// StartedAt is when the forwards started listening.
+	// StartedAt is when the process recorded its forwards, right before it
+	// synced the hosts file and started listening.
 	StartedAt time.Time `json:"started_at"`
 	// Context is the doktunnel context the forwards belong to.
 	Context string `json:"context"`

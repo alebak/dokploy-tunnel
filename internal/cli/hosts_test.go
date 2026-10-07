@@ -13,11 +13,13 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/alebak/dokploy-tunnel/internal/clierr"
 	"github.com/alebak/dokploy-tunnel/internal/hostname"
 	"github.com/alebak/dokploy-tunnel/internal/hosts"
 	"github.com/alebak/dokploy-tunnel/internal/registry"
+	"github.com/alebak/dokploy-tunnel/internal/runstate"
 )
 
 const fixtureHosts = "127.0.0.1\tlocalhost\r\n" +
@@ -39,10 +41,17 @@ type fakeElevator struct {
 	// fail makes Run fail without running the helper, like a wrong
 	// password or a declined UAC prompt.
 	fail bool
+	// block makes Run wait until its context ends, like a password prompt
+	// nobody answers.
+	block bool
 }
 
-func (f *fakeElevator) Run(_ context.Context, argv []string, stdin io.Reader) error {
+func (f *fakeElevator) Run(ctx context.Context, argv []string, stdin io.Reader) error {
 	f.calls = append(f.calls, argv)
+	if f.block {
+		<-ctx.Done()
+		return ctx.Err()
+	}
 	var in []byte
 	if stdin != nil {
 		if f.noStdin {
@@ -118,6 +127,9 @@ type hostsHarness struct {
 	// denyWrite makes every unprivileged write fail like /etc/hosts does
 	// for a normal user.
 	denyWrite bool
+	// alive are the PIDs of running forward processes, besides the test
+	// process itself in the forward tests.
+	alive map[int]bool
 }
 
 func newHostsHarness(t *testing.T) *hostsHarness {
@@ -129,6 +141,7 @@ func newHostsHarness(t *testing.T) *hostsHarness {
 		registryPath: filepath.Join(dir, "state", "doktunnel", "addresses.json"),
 		loopback:     &fakeLoopback{missing: map[netip.Addr]bool{}},
 		env:          map[string]string{},
+		alive:        map[int]bool{},
 	}
 	h.elevator = &fakeElevator{h: h}
 	if err := os.MkdirAll(filepath.Dir(h.hostsPath), 0o755); err != nil {
@@ -164,6 +177,7 @@ func (h *hostsHarness) runWithStdin(privileged, terminal bool, stdin string, arg
 		Loopback:        h.loopback,
 		Executable:      func() (string, error) { return fakeExe, nil },
 		Getenv:          func(k string) string { return h.env[k] },
+		ProcessAlive:    func(pid int) bool { return h.alive[pid] },
 		WriteHosts: func(path string, data []byte) error {
 			if h.denyWrite && !privileged {
 				return &fs.PathError{Op: "open", Path: path, Err: fs.ErrPermission}
@@ -209,10 +223,32 @@ func (h *hostsHarness) lease(serviceID string, n hostname.Names) netip.Addr {
 	return ip
 }
 
+// liveForward records a running forward process pid that listens on ips,
+// as forward does while it runs.
+func (h *hostsHarness) liveForward(pid int, ips ...netip.Addr) {
+	h.t.Helper()
+	h.alive[pid] = true
+	p := runstate.Process{PID: pid, StartedAt: time.Now().UTC(), Context: "prod", CompanionURL: "https://panel.example.com/doktunnel"}
+	for _, ip := range ips {
+		p.Forwards = append(p.Forwards, runstate.Forward{
+			Target: runstate.Target{Type: "postgres", ID: "id-" + ip.String(), Name: "svc"}, IP: ip, Port: 5432,
+		})
+	}
+	if _, err := runstate.Write(runstate.Dir(filepath.Dir(h.registryPath)), p); err != nil {
+		h.t.Fatal(err)
+	}
+}
+
+// fixturePID is the forward process leaseFixture records as running.
+const fixturePID = 4242
+
+// leaseFixture registers two named services and a running forward of
+// both.
 func (h *hostsHarness) leaseFixture() {
 	h.t.Helper()
-	h.lease("cmp_myapp/postgres", hostname.Names{Context: "prod", AppName: "shop-myapp-x1y2z3", ComposeService: "postgres"})
-	h.lease("redis_cache", hostname.Names{Context: "prod", AppName: "shop-cache-g7h8i9"})
+	pg := h.lease("cmp_myapp/postgres", hostname.Names{Context: "prod", AppName: "shop-myapp-x1y2z3", ComposeService: "postgres"})
+	cache := h.lease("redis_cache", hostname.Names{Context: "prod", AppName: "shop-cache-g7h8i9"})
+	h.liveForward(fixturePID, pg, cache)
 }
 
 // fixtureEntries is what the privileged helper receives for leaseFixture.
@@ -448,6 +484,39 @@ func TestHostsSync_MissingAliasesElevateEvenWhenHostsAreCurrent(t *testing.T) {
 	}
 	if r.stderr != "" {
 		t.Errorf("stderr = %q, want nothing in JSON mode", r.stderr)
+	}
+}
+
+func TestHostsSync_WritesOnlyNamesOfRunningForwards(t *testing.T) {
+	h := newHostsHarness(t)
+	pg := h.lease("cmp_myapp/postgres", hostname.Names{Context: "prod", AppName: "shop-myapp-x1y2z3", ComposeService: "postgres"})
+	h.lease("redis_cache", hostname.Names{Context: "prod", AppName: "shop-cache-g7h8i9"})
+	h.liveForward(fixturePID, pg)
+	// A forward that was killed left its state file behind.
+	h.liveForward(999, netip.MustParseAddr("127.77.0.2"))
+	h.alive[999] = false
+	h.writeHosts(fixtureHosts + fixtureBlock)
+
+	r := h.run(false, "hosts", "sync", "--json")
+	if r.exit != 0 {
+		t.Fatalf("exit = %d (stdout %q)", r.exit, r.stdout)
+	}
+	want := fixtureHosts + hosts.BeginLine + "\r\n127.77.0.1\tpostgres.shop-myapp-x1y2z3.internal\r\n" + hosts.EndLine + "\r\n"
+	if got := h.readHosts(); got != want {
+		t.Errorf("hosts file =\n%q\nwant\n%q", got, want)
+	}
+	got := decodeJSON[hostsSyncJSON](t, r.stdout)
+	if len(got.Removed) != 1 || got.Removed[0].Hostname != "shop-cache-g7h8i9.internal" || len(got.Added) != 0 {
+		t.Errorf("JSON = %+v, want only the stopped forward's name removed", got)
+	}
+
+	// Once no forward runs, the section goes.
+	h.alive[fixturePID] = false
+	if r := h.run(false, "hosts", "sync"); r.exit != 0 {
+		t.Fatalf("exit = %d (stderr %q)", r.exit, r.stderr)
+	}
+	if got := h.readHosts(); got != fixtureHosts {
+		t.Errorf("hosts file =\n%q\nwant\n%q", got, fixtureHosts)
 	}
 }
 

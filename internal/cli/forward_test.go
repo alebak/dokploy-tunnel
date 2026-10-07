@@ -162,6 +162,8 @@ type forwardHarness struct {
 	order   []string
 	// busy are requested addresses whose listen fails, as if taken.
 	busy map[string]bool
+	// writes are the hosts file contents written without elevation.
+	writes []string
 }
 
 func newForwardHarness(t *testing.T) *forwardHarness {
@@ -233,8 +235,12 @@ func (h *forwardHarness) app(stdin string, terminal bool, stdout, stderr io.Writ
 			if h.hosts.denyWrite {
 				return &fs.PathError{Op: "open", Path: path, Err: fs.ErrPermission}
 			}
+			h.mu.Lock()
+			h.writes = append(h.writes, string(data))
+			h.mu.Unlock()
 			return hosts.Write(path, data)
 		},
+		ProcessAlive: func(pid int) bool { return pid == os.Getpid() || h.hosts.alive[pid] },
 		NotifyContext: func(parent context.Context) (context.Context, context.CancelFunc) {
 			ctx, cancel := context.WithCancel(parent)
 			stop := context.AfterFunc(h.stop, cancel)
@@ -494,13 +500,13 @@ func TestForward_SyncsHostsFile(t *testing.T) {
 		"127.77.0.1\tshop-maindb-a1b2c3.internal\r\n" +
 		hosts.EndLine + "\r\n"
 
-	t.Run("writes the entry and names the lease", func(t *testing.T) {
+	t.Run("writes the entry, names the lease and removes the entry on exit", func(t *testing.T) {
 		h := newForwardHarness(t)
 		if r := h.forward("", false, "main-db", "--json"); r.exit != 0 {
 			t.Fatalf("exit = %d (stdout %q)", r.exit, r.stdout)
 		}
-		if got := h.hosts.readHosts(); got != fixtureHosts+block {
-			t.Errorf("hosts file =\n%q\nwant\n%q", got, fixtureHosts+block)
+		if want := []string{fixtureHosts + block, fixtureHosts}; !slices.Equal(h.writes, want) {
+			t.Errorf("hosts file writes =\n%q\nwant\n%q", h.writes, want)
 		}
 		if len(h.hosts.elevator.calls) != 0 {
 			t.Errorf("elevated %d times, want none for a writable hosts file", len(h.hosts.elevator.calls))
@@ -529,22 +535,18 @@ func TestForward_SyncsHostsFile(t *testing.T) {
 		if r.exit != 0 {
 			t.Fatalf("exit = %d (stderr %q)", r.exit, r.stderr)
 		}
-		if len(h.hosts.elevator.calls) != 1 {
-			t.Fatalf("elevated %d times, want once", len(h.hosts.elevator.calls))
+		// Once to add the entry, once on exit to remove it.
+		if len(h.hosts.elevator.calls) != 2 {
+			t.Fatalf("elevated %d times, want twice", len(h.hosts.elevator.calls))
 		}
-		if got := h.hosts.readHosts(); got != fixtureHosts+block {
-			t.Errorf("hosts file =\n%q\nwant\n%q", got, fixtureHosts+block)
+		if want := []string{fixtureEntries1, ""}; !slices.Equal(h.hosts.elevator.stdins, want) {
+			t.Errorf("helper stdins = %q, want %q", h.hosts.elevator.stdins, want)
+		}
+		if got := h.hosts.readHosts(); got != fixtureHosts {
+			t.Errorf("hosts file =\n%q\nwant\n%q", got, fixtureHosts)
 		}
 		if !strings.Contains(r.stderr, "needs administrator privileges") {
 			t.Errorf("stderr %q does not explain the elevation", r.stderr)
-		}
-
-		// Nothing changed the second time, so nothing is elevated.
-		if r := h.forward("", true, "main-db"); r.exit != 0 {
-			t.Fatalf("second run: exit = %d (stderr %q)", r.exit, r.stderr)
-		}
-		if len(h.hosts.elevator.calls) != 1 {
-			t.Errorf("elevated %d times in all, want still once", len(h.hosts.elevator.calls))
 		}
 	})
 
@@ -579,6 +581,105 @@ func TestForward_SyncsHostsFile(t *testing.T) {
 			t.Errorf("elevated %d times and added aliases %v, want once and %v", len(h.hosts.elevator.calls), h.hosts.loopback.added, ip)
 		}
 	})
+}
+
+// fixtureEntries1 is what the privileged helper receives to add main-db.
+const fixtureEntries1 = "127.77.0.1\tshop-maindb-a1b2c3.internal\n"
+
+func TestForward_ExitKeepsNamesOfOtherRunningForwards(t *testing.T) {
+	h := newForwardHarness(t)
+	// Another forward process runs cache, and once ran main-db too.
+	cache := h.hosts.lease("redis_cache", hostname.Names{Context: "prod", AppName: "shop-cache-g7h8i9"})
+	main := h.hosts.lease("pg_main", hostname.Names{Context: "prod", AppName: "shop-maindb-a1b2c3"})
+	h.hosts.liveForward(77, cache)
+	h.hosts.writeHosts(fixtureHosts + hosts.BeginLine + "\r\n127.77.0.1\tshop-cache-g7h8i9.internal\r\n" + hosts.EndLine + "\r\n")
+
+	if r := h.forward("", false, "main-db", "cache", "--json"); r.exit != 0 {
+		t.Fatalf("exit = %d (stdout %q)", r.exit, r.stdout)
+	}
+	if main != netip.MustParseAddr("127.77.0.2") {
+		t.Fatalf("main-db leased %v", main)
+	}
+	both := fixtureHosts + hosts.BeginLine + "\r\n127.77.0.1\tshop-cache-g7h8i9.internal\r\n127.77.0.2\tshop-maindb-a1b2c3.internal\r\n" + hosts.EndLine + "\r\n"
+	onlyCache := fixtureHosts + hosts.BeginLine + "\r\n127.77.0.1\tshop-cache-g7h8i9.internal\r\n" + hosts.EndLine + "\r\n"
+	if want := []string{both, onlyCache}; !slices.Equal(h.writes, want) {
+		t.Errorf("hosts file writes =\n%q\nwant\n%q", h.writes, want)
+	}
+	if _, err := os.Stat(runstate.Path(h.stateDir(), os.Getpid())); !os.IsNotExist(err) {
+		t.Errorf("state file still exists after exit: %v", err)
+	}
+}
+
+func TestForward_ExitWithoutElevationLeavesEntries(t *testing.T) {
+	block := fixtureHosts + hosts.BeginLine + "\r\n127.77.0.1\tshop-maindb-a1b2c3.internal\r\n" + hosts.EndLine + "\r\n"
+	tests := []struct {
+		name     string
+		terminal bool
+		args     []string
+		setup    func(h *forwardHarness)
+		calls    int
+	}{
+		{name: "--no-input", terminal: true, args: []string{"--no-input"}},
+		{name: "no terminal", terminal: false},
+		{name: "elevation refused", terminal: true, setup: func(h *forwardHarness) { h.hosts.elevator.fail = true }, calls: 1},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			h := newForwardHarness(t)
+			// The section already holds main-db, so starting needs no
+			// privileges, but removing it on exit does.
+			h.hosts.lease("pg_main", hostname.Names{Context: "prod", AppName: "shop-maindb-a1b2c3"})
+			h.hosts.writeHosts(block)
+			h.hosts.denyWrite = true
+			if tt.setup != nil {
+				tt.setup(h)
+			}
+			r := h.forward("", tt.terminal, append([]string{"main-db"}, tt.args...)...)
+			if r.exit != 0 {
+				t.Fatalf("exit = %d, want 0 (stdout %q, stderr %q)", r.exit, r.stdout, r.stderr)
+			}
+			if got := h.hosts.readHosts(); got != block {
+				t.Errorf("hosts file =\n%q\nwant the entry left in place", got)
+			}
+			if len(h.hosts.elevator.calls) != tt.calls {
+				t.Errorf("elevated %d times, want %d", len(h.hosts.elevator.calls), tt.calls)
+			}
+			if !strings.Contains(r.stderr, "warning: ") || !strings.Contains(r.stderr, "doktunnel hosts clean") {
+				t.Errorf("stderr = %q, want a warning naming doktunnel hosts clean", r.stderr)
+			}
+			if _, err := os.Stat(h.hosts.pendingPath()); !os.IsNotExist(err) {
+				t.Errorf("exit left a pending entries file: %v", err)
+			}
+		})
+	}
+}
+
+func TestForward_ExitCleanupIsBounded(t *testing.T) {
+	defer func(d time.Duration) { hostsCleanupTimeout = d }(hostsCleanupTimeout)
+	hostsCleanupTimeout = 50 * time.Millisecond
+
+	h := newForwardHarness(t)
+	h.hosts.lease("pg_main", hostname.Names{Context: "prod", AppName: "shop-maindb-a1b2c3"})
+	block := fixtureHosts + hosts.BeginLine + "\r\n127.77.0.1\tshop-maindb-a1b2c3.internal\r\n" + hosts.EndLine + "\r\n"
+	h.hosts.writeHosts(block)
+	h.hosts.denyWrite = true
+	// Nobody answers the password prompt on exit.
+	h.hosts.elevator.block = true
+
+	start := time.Now()
+	r := h.forward("", true, "main-db")
+	if r.exit != 0 {
+		t.Fatalf("exit = %d (stderr %q)", r.exit, r.stderr)
+	}
+	if took := time.Since(start); took > forwardWait/2 {
+		t.Errorf("forward took %v to exit, want it bounded by the cleanup timeout", took)
+	}
+	if got := h.hosts.readHosts(); got != block {
+		t.Errorf("hosts file =\n%q\nwant the entry left in place", got)
+	}
+	if !strings.Contains(r.stderr, "doktunnel hosts clean") {
+		t.Errorf("stderr = %q, want a warning naming doktunnel hosts clean", r.stderr)
+	}
 }
 
 func TestForward_HumanOutput(t *testing.T) {
@@ -636,6 +737,12 @@ func TestForward_EndToEnd(t *testing.T) {
 		t.Errorf("state = %+v", state)
 	}
 
+	// While it runs, the hosts file holds its hostname.
+	running := fixtureHosts + hosts.BeginLine + "\r\n127.77.0.1\tpostgres.shop-myapp-x1y2z3.internal\r\n" + hosts.EndLine + "\r\n"
+	if got := h.hosts.readHosts(); got != running {
+		t.Errorf("hosts file while forwarding =\n%q\nwant\n%q", got, running)
+	}
+
 	h.mu.Lock()
 	ln := h.listens["127.77.0.1:5432"]
 	h.mu.Unlock()
@@ -687,6 +794,9 @@ func TestForward_EndToEnd(t *testing.T) {
 	}
 	if _, err := os.Stat(runstate.Path(h.stateDir(), os.Getpid())); !os.IsNotExist(err) {
 		t.Errorf("state file still exists after shutdown: %v", err)
+	}
+	if got := h.hosts.readHosts(); got != fixtureHosts {
+		t.Errorf("hosts file after shutdown =\n%q\nwant its hostname removed", got)
 	}
 	if strings.Count(stdout.String(), "\n") != 1 {
 		t.Errorf("stdout = %q, want only the JSON result", stdout.String())
@@ -776,8 +886,9 @@ func TestForward_MigratesNamesOfAnOlderVersion(t *testing.T) {
 	if got := decodeJSON[forwardOut](t, r.stdout).summary(); !slices.Equal(got, []string{"pg_main@127.77.0.7:5432=shop-maindb-a1b2c3.internal"}) {
 		t.Errorf("forwards = %q, want the old address under the new name", got)
 	}
+	// One sync replaced the old name.
 	want := fixtureHosts + hosts.BeginLine + "\r\n127.77.0.7\tshop-maindb-a1b2c3.internal\r\n" + hosts.EndLine + "\r\n"
-	if got := h.hosts.readHosts(); got != want {
-		t.Errorf("hosts file =\n%q\nwant\n%q", got, want)
+	if len(h.writes) == 0 || h.writes[0] != want {
+		t.Errorf("hosts file writes =\n%q\nwant first\n%q", h.writes, want)
 	}
 }
