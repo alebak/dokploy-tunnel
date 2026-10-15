@@ -21,7 +21,7 @@ What you end up with:
 ## Prerequisites
 
 - You are an owner or admin of the Dokploy organization and can run `docker` on the server.
-- The panel is served on a domain over HTTPS (Dokploy's web server settings, with a Let's Encrypt certificate), such as `https://dokploy.example.com`. A panel reached only as `http://<ip>:3000` works too, with a [LAN port or another domain](#other-addresses).
+- The panel is served on a domain over HTTPS (Dokploy's web server settings, with a Let's Encrypt certificate), such as `https://dokploy.example.com`. A panel reached only as `http://<ip>:3000`, such as a company server on an internal network, works too: see [an internal network without a domain](#other-addresses).
 - The group ID of the Docker socket on the server:
 
   ```sh
@@ -155,9 +155,16 @@ The default route needs the panel's own domain behind Traefik. If you prefer ano
 | Address | Change in the compose file | Companion URL |
 |---------|----------------------------|---------------|
 | Another domain, such as `tunnel.example.com` | Rule ``Host(`tunnel.example.com`)``, and remove the `middlewares` label | `https://tunnel.example.com` |
+| An internal network without a domain or TLS (panel at `http://<server-ip>:3000`) | Set `PANEL_DOMAIN=<server-ip>`, change the `entrypoints` label to `web`, and remove the `tls.certresolver` label | `http://<server-ip>/doktunnel` |
 | A LAN port | Add `ports: ["8081:8080"]` to `companion` (and drop the labels if Traefik is not used) | `http://<server-ip>:8081` |
 
-A LAN port is **plain HTTP**: every tunnel request carries the user's API key in clear. Use it only on a trusted network, such as a LAN or a VPN. Never publish a port on `socket-proxy`.
+**An internal network without a domain** is the usual case for a company server reached over a LAN or a VPN. The companion stays behind Traefik on port 80, which Dokploy already opens, so no new port is published and a firewall that only allows ports 80 and 443 keeps working. Port 3000 cannot be used: it is Dokploy's own panel, not Traefik. The default companion URL (`<panel URL>/doktunnel`) would point at port 3000, so users pass the URL explicitly:
+
+```sh
+doktunnel context add --url http://<server-ip>:3000 --name office --companion-url http://<server-ip>/doktunnel
+```
+
+Both the internal-network and the LAN-port variants are **plain HTTP**: every tunnel request carries the user's API key in clear. Use them only on a trusted network, such as a LAN or a VPN. Prefer the internal-network variant: it adds no port. Never publish a port on `socket-proxy`.
 
 ## Remote servers
 
