@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"maps"
 	"net/netip"
 	"os"
 	"time"
@@ -43,6 +44,10 @@ type fileLease struct {
 	// before names were recorded have none, and files written before
 	// hostnames came from the appName have only the context.
 	Names hostname.Names `json:"names,omitzero"`
+	// LocalPorts maps service ports below 1024 to the local ports they are
+	// listened on (see MapPorts); JSON keys are the service ports. It is
+	// additive: older files have none, and older versions ignore it.
+	LocalPorts map[int]int `json:"local_ports,omitempty"`
 }
 
 func (l fileLease) key() Key {
@@ -50,7 +55,7 @@ func (l fileLease) key() Key {
 }
 
 func (l fileLease) lease() Lease {
-	return Lease{Key: l.key(), IP: l.IP, CreatedAt: l.CreatedAt, Names: l.Names}
+	return Lease{Key: l.key(), IP: l.IP, CreatedAt: l.CreatedAt, Names: l.Names, LocalPorts: maps.Clone(l.LocalPorts)}
 }
 
 // find returns the index of the lease for the normalized key k, or -1.

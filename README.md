@@ -161,7 +161,7 @@ Lists are always present, possibly empty. New fields may be added; existing fiel
 
 ### Forward
 
-`doktunnel forward` forwards one or more services to their [hostnames](#hostnames) and real ports, and runs in the foreground until you press Ctrl+C:
+`doktunnel forward` forwards one or more services to their [hostnames](#hostnames) and real ports (ports below 1024 [move up by 8000](#ports-below-1024)), and runs in the foreground until you press Ctrl+C:
 
 ```console
 $ doktunnel forward myapp/postgres main-db
@@ -183,6 +183,26 @@ Name services as [`services`](#services) lists them: by name, as `<compose>/<ser
 
 doktunnel never guesses: a container that exposes no port fails with `missing_input` naming `--port`, and one that exposes several (such as RabbitMQ's 5672 and 15672) fails the same way unless you pass `--all-ports` to forward each of them. With `--all`, every selected service must resolve; narrow the selection or name the services otherwise.
 
+<a id="ports-below-1024"></a>**Ports below 1024.** Listening on a port below 1024 (HTTP 80, HTTPS 443, SMTP 25, ...) needs privileges, so doktunnel listens on `port + 8000` instead, on the service's own address, and never elevates for it on any OS:
+
+| Service port | Local port |
+|--------------|------------|
+| 1024 and up (3000, 5432, 8080, ...) | the same number |
+| 80 | 8080 |
+| 443 | 8443 |
+| 25, 110, 22 | 8025, 8110, 8022 |
+
+If the service also exposes that number itself, the next number up that it does not expose is used: a service exposing both 80 and 8080 keeps 8080 on 8080 and gets 80 on 8081. Several services on port 80 never collide, since each listens on its own address: `api.shop-x1y2z3.internal:8080` and `web.shop-x1y2z3.internal:8080`. The chosen local port is stored in the service's lease, so the service gets the same one on every later forward, whatever order the companion reports its ports in. If the service later exposes a stored local port itself, a new one is picked and `forward` prints a warning.
+
+```console
+$ doktunnel forward myapp/web --all-ports
+web.shop-myapp-x1y2z3.internal (127.77.0.5:8080) → myapp/web:80
+web.shop-myapp-x1y2z3.internal (127.77.0.5:8443) → myapp/web:443
+Forwarding; press Ctrl+C to stop.
+```
+
+`--local-port <n>` listens on `n` instead, for any port; it applies only when a single port of a single service is forwarded, and it is not stored, so the next forward without it follows the rule again. It fails with `invalid_argument`, naming both ports, when another port of the service already uses `n` (a port the service exposes itself, or the stored local port of another of its ports) or when a running `forward` already listens on that address and port.
+
 **Addresses and hosts file.** Each service is leased its address in the [address registry](#hostnames), its appName is read (one details call per service or compose stack whose appName `doktunnel` does not know yet) and recorded, and the hosts file is synced exactly as `doktunnel hosts sync` does: it asks for administrator privileges once, and only when something changed. On macOS the same step adds the `lo0` aliases, which are lost on reboot. With `--no-input` and a change to make, `forward` fails with `elevation_required`, and the hint is the command to run first. Listeners are bound to the leased address and port only, never `0.0.0.0`; if any of them cannot be bound (for example, the service is already forwarded by another `doktunnel forward`), nothing is forwarded.
 
 **Connections.** Every local connection opens its own tunnel through the context's [companion](#companion-url). Connection events go to stderr, one line each. Ctrl+C or `SIGTERM` (on Windows, Ctrl+C, Ctrl+Break or closing the console) closes every open tunnel, so the companion removes its repeaters once their grace period ends, and exits with code 0.
@@ -192,10 +212,10 @@ doktunnel never guesses: a container that exposes no port fails with `missing_in
 With `--json`, `forward` prints one object once every forward listens, and nothing else afterwards:
 
 ```json
-{"context":"prod","pid":4242,"started_at":"2026-10-06T12:00:00Z","companion_url":"https://dokploy.example.com/doktunnel","forwards":[{"target":{"type":"compose_service","id":"cmp_myapp/postgres","name":"myapp/postgres"},"hostname":"postgres.shop-myapp-x1y2z3.internal","ip":"127.77.0.1","port":5432}]}
+{"context":"prod","pid":4242,"started_at":"2026-10-06T12:00:00Z","companion_url":"https://dokploy.example.com/doktunnel","forwards":[{"target":{"type":"compose_service","id":"cmp_myapp/postgres","name":"myapp/postgres"},"hostname":"postgres.shop-myapp-x1y2z3.internal","ip":"127.77.0.1","port":5432,"service_port":5432}]}
 ```
 
-`target.type` is the Dokploy service type or `compose_service`, and `target.id` and `target.name` are as `services` reports them. While it runs, each `forward` process records the same data in `forwards/<pid>.json` in the doktunnel state directory (next to the address registry), which [`doktunnel status`](#status) lists; the file is removed on exit.
+`port` is the local port the listener is bound to and `service_port` the container port the tunnels connect to; they differ only for [ports below 1024](#ports-below-1024) and `--local-port`. `target.type` is the Dokploy service type or `compose_service`, and `target.id` and `target.name` are as `services` reports them. While it runs, each `forward` process records the same data in `forwards/<pid>.json` in the doktunnel state directory (next to the address registry), which [`doktunnel status`](#status) lists; the file is removed on exit.
 
 ### Status
 
@@ -206,30 +226,31 @@ $ doktunnel status
 CONTEXT  HOSTNAME                             ADDRESS          TARGET          PID   SINCE
 prod     postgres.shop-myapp-x1y2z3.internal  127.77.0.1:5432  myapp/postgres  4242  2026-10-06 07:00:00
 prod     shop-maindb-a1b2c3.internal          127.77.0.2:5432  main-db         4242  2026-10-06 07:00:00
+prod     web.shop-myapp-x1y2z3.internal       127.77.0.5:8080  myapp/web:80    4243  2026-10-06 07:05:00
 ```
 
-Rows are sorted by context, hostname and port, and `SINCE` is when the process started forwarding, in local time. With no running forward it prints `No active forwards.` to stderr. `status` shows every context unless `--context <name>` is given explicitly; the current context does not filter it. It needs no network access and no configured context.
+`ADDRESS` is the local address and port; when the service port differs (a [port below 1024](#ports-below-1024), or `--local-port`), `TARGET` ends in `:<service port>`. Rows are sorted by context, hostname and port, and `SINCE` is when the process started forwarding, in local time. With no running forward it prints `No active forwards.` to stderr. `status` shows every context unless `--context <name>` is given explicitly; the current context does not filter it. It needs no network access and no configured context.
 
 It reads the files `forward` processes keep in `forwards/<pid>.json` in the doktunnel state directory. A file whose process is no longer running (for example, one that was killed) is stale and removed. A file of a running process that cannot be read, such as one written by another doktunnel version, is left in place and reported as a warning on stderr; it does not fail the command. doktunnel cannot portably tell a killed `forward` process from an unrelated program that later got the same PID, so such a stale file is listed until that program exits.
 
 With `--json`:
 
 ```json
-{"forwards":[{"pid":4242,"started_at":"2026-10-06T12:00:00Z","context":"prod","companion_url":"https://dokploy.example.com/doktunnel","target":{"type":"postgres","id":"pg_main","name":"main-db"},"hostname":"shop-maindb-a1b2c3.internal","ip":"127.77.0.2","port":5432}],"warnings":[]}
+{"forwards":[{"pid":4242,"started_at":"2026-10-06T12:00:00Z","context":"prod","companion_url":"https://dokploy.example.com/doktunnel","target":{"type":"postgres","id":"pg_main","name":"main-db"},"hostname":"shop-maindb-a1b2c3.internal","ip":"127.77.0.2","port":5432,"service_port":5432}],"warnings":[]}
 ```
 
 | Field | Meaning |
 |-------|---------|
 | `forwards[].pid`, `.started_at` | The `forward` process and when it started forwarding (RFC 3339) |
 | `forwards[].context`, `.companion_url` | The context and companion the process uses |
-| `forwards[].target`, `.hostname`, `.ip`, `.port` | The forward, as `forward --json` prints it |
+| `forwards[].target`, `.hostname`, `.ip`, `.port`, `.service_port` | The forward, as `forward --json` prints it: `port` is the local port, `service_port` the container port |
 | `warnings` | Files that could not be read or removed, one string each |
 
 Both lists are always present, possibly empty. New fields may be added; existing fields keep their meaning.
 
 ### Hostnames
 
-Every forwarded service gets its own loopback address from `127.77.0.0/16` and a stable hostname under `.internal`, a top-level domain reserved for private use:
+Every forwarded service gets its own loopback address from `127.77.0.0/16` and a stable hostname under `.internal`, a top-level domain reserved for private use. Its lease in the address registry also keeps the local ports of its [ports below 1024](#ports-below-1024):
 
 | Target | Hostname |
 |--------|----------|
@@ -447,6 +468,7 @@ The compose check relies on two facts that hold under Dokploy's default deployme
 The `platform` workflow (`.github/workflows/platform.yml`) checks on GitHub's Linux, macOS and Windows runners what unit tests can only fake:
 
 - **Loopback addresses:** listeners on addresses in `127.77.0.0/16` bind and accept connections natively on Linux and Windows, and on macOS only after `ifconfig lo0 alias <ip> up` (the probe adds and removes the aliases).
+- **Ports below 1024:** an unprivileged process listens on a leased address at the local port doktunnel picks for port 80 (8080) and accepts a connection, without elevation; whether port 80 itself could be bound is only reported.
 - **Hosts file round trip:** the real `doktunnel` binary runs `hosts sync` against the runner's hosts file with real privileges (sudo on Linux and macOS, on a pseudo-terminal as a person would; on Windows the runner is already an elevated Administrator, so the file is written directly), the entries resolve through `getent`, `dscacheutil` or `Resolve-DnsName` and accept connections by name, and `hosts clean` leaves the unrelated lines around the block byte for byte. On Windows it also runs the privileged helper through a real UAC elevation (`Start-Process -Verb RunAs`) to check that it completes unattended.
 - **Install scripts:** GoReleaser builds snapshot release artifacts on the runner, which are served from `127.0.0.1`; `install.sh` (Linux, macOS) and `install.ps1` (Windows, under PowerShell 7 and Windows PowerShell 5.1) must refuse an archive whose checksum does not match, then install the snapshot, and the installed `doktunnel --version` must report it. The scripts read the local URL from `DOKTUNNEL_TEST_DOWNLOAD_BASE`, a test-only variable that accepts nothing but `http://127.0.0.1:<port>` or `http://localhost:<port>` and that installing doktunnel never needs.
 

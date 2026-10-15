@@ -62,7 +62,7 @@ cross-site WebSocket hijacking.
 |-----------|----------|---------|
 | `serviceType` | yes | `application`, `compose`, `postgres`, `mysql`, `mariadb`, `mongo`, `redis`, `libsql`, or `compose_service` for a service inside a compose stack |
 | `serviceId` | yes | The Dokploy ID of the service. For `compose_service`, `<composeId>/<service>`: the ID of the compose stack and the service's name in its compose file, such as `cmp_myapp/postgres`. These are the `type` and `id` that `doktunnel services --json` prints. |
-| `port` | yes | The container port to connect to, `1`–`65535`. The companion does not guess ports; the client resolves them. |
+| `port` | yes | The container port to connect to, `1`–`65535`. The companion does not guess ports; the client resolves them. It is always the container port, even when the client listens locally on another one (`doktunnel` listens on 8080 for a container port 80). |
 | `serverId` | no | The Dokploy server the client expects the target to run on: a server ID, or `local` for the Dokploy server itself. When present, it must match the companion's server. |
 
 IDs are 1–128 characters of `A-Z a-z 0-9 _ -`. Compose service names are

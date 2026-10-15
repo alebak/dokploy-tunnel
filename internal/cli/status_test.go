@@ -154,9 +154,9 @@ func TestStatus_JSONListsLiveForwards(t *testing.T) {
 	}
 	// Sorted by context, hostname and port.
 	want := `{"forwards":[` +
-		`{"pid":200,"started_at":"2026-10-06T13:00:00Z","context":"dev","companion_url":"https://dev.example.com/doktunnel","target":{"type":"postgres","id":"pg_main-db","name":"main-db"},"hostname":"shop-maindb-a1b2c3.dev.internal","ip":"127.77.0.9","port":5432},` +
-		`{"pid":300,"started_at":"2026-10-06T12:00:00Z","context":"prod","companion_url":"https://prod.example.com/doktunnel","target":{"type":"postgres","id":"pg_cache","name":"cache"},"hostname":"shop-cache-g7h8i9.internal","ip":"127.77.0.3","port":6379},` +
-		`{"pid":300,"started_at":"2026-10-06T12:00:00Z","context":"prod","companion_url":"https://prod.example.com/doktunnel","target":{"type":"postgres","id":"pg_main-db","name":"main-db"},"hostname":"shop-maindb-a1b2c3.internal","ip":"127.77.0.2","port":5432}` +
+		`{"pid":200,"started_at":"2026-10-06T13:00:00Z","context":"dev","companion_url":"https://dev.example.com/doktunnel","target":{"type":"postgres","id":"pg_main-db","name":"main-db"},"hostname":"shop-maindb-a1b2c3.dev.internal","ip":"127.77.0.9","port":5432,"service_port":5432},` +
+		`{"pid":300,"started_at":"2026-10-06T12:00:00Z","context":"prod","companion_url":"https://prod.example.com/doktunnel","target":{"type":"postgres","id":"pg_cache","name":"cache"},"hostname":"shop-cache-g7h8i9.internal","ip":"127.77.0.3","port":6379,"service_port":6379},` +
+		`{"pid":300,"started_at":"2026-10-06T12:00:00Z","context":"prod","companion_url":"https://prod.example.com/doktunnel","target":{"type":"postgres","id":"pg_main-db","name":"main-db"},"hostname":"shop-maindb-a1b2c3.internal","ip":"127.77.0.2","port":5432,"service_port":5432}` +
 		`],"warnings":[]}` + "\n"
 	if r.stdout != want {
 		t.Errorf("stdout:\n%s\nwant:\n%s", r.stdout, want)
@@ -172,18 +172,24 @@ func TestStatus_HumanTable(t *testing.T) {
 		statusForward("myapp/postgres", "postgres.shop-myapp-x1y2z3.dev.internal", "127.77.0.9", 5432),
 	), true)
 
+	remapped := statusForward("myapp/pgadmin", "pgadmin.shop-myapp-x1y2z3.internal", "127.77.0.4", 8080)
+	remapped.ServicePort = 80
+	h.write(statusProcess(400, "prod", statusStart, remapped), true)
+
 	r := h.run("status")
 	if r.exit != 0 || r.stderr != "" {
 		t.Fatalf("exit %d, stderr %q", r.exit, r.stderr)
 	}
 	since := statusStart.Local().Format(time.DateTime)
 	lines := strings.Split(strings.TrimSuffix(r.stdout, "\n"), "\n")
-	if len(lines) != 3 {
-		t.Fatalf("stdout has %d lines, want header and 2 rows:\n%s", len(lines), r.stdout)
+	if len(lines) != 4 {
+		t.Fatalf("stdout has %d lines, want header and 3 rows:\n%s", len(lines), r.stdout)
 	}
 	wantRows := [][]string{
 		{"CONTEXT", "HOSTNAME", "ADDRESS", "TARGET", "PID", "SINCE"},
 		append([]string{"dev", "postgres.shop-myapp-x1y2z3.dev.internal", "127.77.0.9:5432", "myapp/postgres", "200"}, strings.Fields(since)...),
+		// A remapped port names its service port after the target.
+		append([]string{"prod", "pgadmin.shop-myapp-x1y2z3.internal", "127.77.0.4:8080", "myapp/pgadmin:80", "400"}, strings.Fields(since)...),
 		append([]string{"prod", "shop-maindb-a1b2c3.internal", "127.77.0.2:5432", "main-db", "300"}, strings.Fields(since)...),
 	}
 	for i, line := range lines {
@@ -192,7 +198,7 @@ func TestStatus_HumanTable(t *testing.T) {
 		}
 	}
 	// Columns are aligned.
-	if col := strings.Index(lines[0], "HOSTNAME"); strings.Index(lines[1], "postgres.") != col || strings.Index(lines[2], "shop-maindb-") != col {
+	if col := strings.Index(lines[0], "HOSTNAME"); strings.Index(lines[1], "postgres.") != col || strings.Index(lines[3], "shop-maindb-") != col {
 		t.Errorf("HOSTNAME column is not aligned:\n%s", r.stdout)
 	}
 }

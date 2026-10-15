@@ -3,7 +3,9 @@
 package platformtest
 
 import (
+	"net"
 	"net/netip"
+	"os"
 	"runtime"
 	"testing"
 
@@ -72,4 +74,61 @@ func probeWithAlias(t *testing.T, ip netip.Addr) {
 		t.Fatalf("lo0 alias %s still present after removal (err %v)", ip, err)
 	}
 	report(t, "removed the lo0 alias %s", ip)
+}
+
+// remapAddr is the address the remapped low port probe listens on, apart
+// from probeAddrs and the hosts round trip.
+const remapAddr = "127.77.249.1"
+
+// TestLoopback_RemappedLowPort proves that forwarding a service on port 80
+// needs no privileges for the port: the local port doktunnel picks for it
+// is one an unprivileged process can listen on, on a leased address, and it
+// accepts connections. Whether port 80 itself could be bound is only
+// reported, since doktunnel never tries it. On macOS the address needs a lo0
+// alias first, which is the only step that uses sudo.
+func TestLoopback_RemappedLowPort(t *testing.T) {
+	requirePlatform(t)
+	ip := netip.MustParseAddr(remapAddr)
+	if !registry.DefaultRange.Contains(ip) {
+		t.Fatalf("probe address %s is outside %s", ip, registry.DefaultRange)
+	}
+	if os.Geteuid() == 0 {
+		t.Fatal("the probe runs as root, so it cannot show that the remapped port needs no privileges")
+	}
+	if runtime.GOOS == "darwin" {
+		present, err := hasLo0Alias(ip)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if present {
+			t.Fatalf("lo0 already has %s; the runner is not in the expected clean state", ip)
+		}
+		t.Cleanup(func() { removeLo0Alias(t, ip) })
+		if _, err := sudo(nil, ifconfigPath, "lo0", "alias", ip.String(), "up"); err != nil {
+			t.Fatalf("adding a lo0 alias for %s: %v", ip, err)
+		}
+	}
+
+	if ln, err := net.Listen("tcp", netip.AddrPortFrom(ip, 80).String()); err == nil {
+		ln.Close()
+		report(t, "%s:80 could also be bound directly by this process", ip)
+	} else {
+		report(t, "%s:80 cannot be bound without privileges, as expected (%v)", ip, err)
+	}
+
+	local := registry.PreferredLocalPort(80)
+	if local != 8080 {
+		t.Fatalf("PreferredLocalPort(80) = %d, want 8080", local)
+	}
+	addr := netip.AddrPortFrom(ip, uint16(local)).String()
+	ln, err := net.Listen("tcp", addr)
+	if err != nil {
+		finding(t, "%s refused the remapped port %s to an unprivileged process (%v); forwarding port 80 would fail", runtime.GOOS, addr, err)
+		t.Fatalf("listening on %s: %v", addr, err)
+	}
+	defer ln.Close()
+	if err := echo(ln, addr); err != nil {
+		t.Fatalf("connecting to %s: %v", addr, err)
+	}
+	report(t, "an unprivileged process listened on %s for port 80 and accepted a connection", addr)
 }
