@@ -16,6 +16,7 @@ import (
 	"github.com/alebak/dokploy-tunnel/internal/elevate"
 	"github.com/alebak/dokploy-tunnel/internal/hosts"
 	"github.com/alebak/dokploy-tunnel/internal/keyring"
+	"github.com/alebak/dokploy-tunnel/internal/lowport"
 	"github.com/alebak/dokploy-tunnel/internal/prompt"
 )
 
@@ -127,4 +128,13 @@ type Env struct {
 	Listen func(network, addr string) (net.Listener, error)
 	// ProcessAlive reports whether a process is running.
 	ProcessAlive func(pid int) bool
+	// PrivilegedPort reports whether listening on a port needs
+	// administrator privileges.
+	PrivilegedPort func(port int) bool
+	// PortLimit returns the first port an unprivileged process may listen
+	// on; the privileged helper refuses any port from it on.
+	PortLimit func() int
+	// PortBroker opens listeners in the privileged helper and passes them
+	// to forward.
+	PortBroker lowport.Broker
 }

@@ -130,6 +130,11 @@ type hostsHarness struct {
 	// alive are the PIDs of running forward processes, besides the test
 	// process itself in the forward tests.
 	alive map[int]bool
+	// broker opens the listeners the privileged helper hands over.
+	broker *fakeBroker
+	// privilegedPorts makes ports below 1024 need privileges, as on Linux;
+	// otherwise no port does.
+	privilegedPorts bool
 }
 
 func newHostsHarness(t *testing.T) *hostsHarness {
@@ -142,6 +147,7 @@ func newHostsHarness(t *testing.T) *hostsHarness {
 		loopback:     &fakeLoopback{missing: map[netip.Addr]bool{}},
 		env:          map[string]string{},
 		alive:        map[int]bool{},
+		broker:       newFakeBroker(),
 	}
 	h.elevator = &fakeElevator{h: h}
 	if err := os.MkdirAll(filepath.Dir(h.hostsPath), 0o755); err != nil {
@@ -178,6 +184,9 @@ func (h *hostsHarness) runWithStdin(privileged, terminal bool, stdin string, arg
 		Executable:      func() (string, error) { return fakeExe, nil },
 		Getenv:          func(k string) string { return h.env[k] },
 		ProcessAlive:    func(pid int) bool { return h.alive[pid] },
+		PrivilegedPort:  h.privilegedPort,
+		PortLimit:       func() int { return 1024 },
+		PortBroker:      h.broker,
 		WriteHosts: func(path string, data []byte) error {
 			if h.denyWrite && !privileged {
 				return &fs.PathError{Op: "open", Path: path, Err: fs.ErrPermission}
@@ -187,6 +196,10 @@ func (h *hostsHarness) runWithStdin(privileged, terminal bool, stdin string, arg
 	}
 	exit := app.Run(args)
 	return result{exit: exit, stdout: stdout.String(), stderr: stderr.String()}
+}
+
+func (h *hostsHarness) privilegedPort(port int) bool {
+	return h.privilegedPorts && port < 1024
 }
 
 func (h *hostsHarness) writeHosts(content string) {

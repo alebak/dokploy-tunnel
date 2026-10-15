@@ -21,6 +21,7 @@ import (
 	"github.com/alebak/dokploy-tunnel/internal/elevate"
 	"github.com/alebak/dokploy-tunnel/internal/hosts"
 	"github.com/alebak/dokploy-tunnel/internal/keyring"
+	"github.com/alebak/dokploy-tunnel/internal/lowport"
 	"github.com/alebak/dokploy-tunnel/internal/output"
 	"github.com/alebak/dokploy-tunnel/internal/prompt"
 	"github.com/alebak/dokploy-tunnel/internal/runstate"
@@ -77,6 +78,15 @@ type App struct {
 	// ProcessAlive reports whether a process is running; nil means
 	// runstate.Alive.
 	ProcessAlive func(pid int) bool
+	// PrivilegedPort reports whether listening on a port needs
+	// administrator privileges; nil means lowport.Privileged().
+	PrivilegedPort func(port int) bool
+	// PortLimit returns the first unprivileged port; nil means
+	// lowport.Limit.
+	PortLimit func() int
+	// PortBroker passes listeners from the privileged helper to forward;
+	// nil means lowport.System().
+	PortBroker lowport.Broker
 }
 
 // Run executes the command selected by args (without the program name) and
@@ -175,6 +185,9 @@ func (a *App) env(g Globals) *Env {
 		NotifyContext:  a.NotifyContext,
 		Listen:         a.Listen,
 		ProcessAlive:   a.ProcessAlive,
+		PrivilegedPort: a.PrivilegedPort,
+		PortLimit:      a.PortLimit,
+		PortBroker:     a.PortBroker,
 	}
 	env.NoInput = env.NoInput || !a.StdinIsTerminal
 	env.Input = prompt.New(!env.NoInput, stdin, a.Stderr)
@@ -198,6 +211,15 @@ func (a *App) env(g Globals) *Env {
 	}
 	if env.ProcessAlive == nil {
 		env.ProcessAlive = runstate.Alive
+	}
+	if env.PrivilegedPort == nil {
+		env.PrivilegedPort = lowport.Privileged()
+	}
+	if env.PortLimit == nil {
+		env.PortLimit = lowport.Limit
+	}
+	if env.PortBroker == nil {
+		env.PortBroker = lowport.System()
 	}
 	if env.NotifyContext == nil {
 		env.NotifyContext = func(parent context.Context) (context.Context, context.CancelFunc) {

@@ -240,7 +240,10 @@ func (h *forwardHarness) app(stdin string, terminal bool, stdout, stderr io.Writ
 			h.mu.Unlock()
 			return hosts.Write(path, data)
 		},
-		ProcessAlive: func(pid int) bool { return pid == os.Getpid() || h.hosts.alive[pid] },
+		ProcessAlive:   func(pid int) bool { return pid == os.Getpid() || h.hosts.alive[pid] },
+		PrivilegedPort: h.hosts.privilegedPort,
+		PortLimit:      func() int { return 1024 },
+		PortBroker:     h.hosts.broker,
 		NotifyContext: func(parent context.Context) (context.Context, context.CancelFunc) {
 			ctx, cancel := context.WithCancel(parent)
 			stop := context.AfterFunc(h.stop, cancel)

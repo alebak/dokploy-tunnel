@@ -5,6 +5,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"net"
 	"net/netip"
 	"os"
 	"path/filepath"
@@ -68,7 +69,11 @@ func newForwardCommand() *Command {
 			"The port is --port, else a database's default port, else the port the companion reports for the " +
 			"container; several ports need --port or --all-ports, and none fails with missing_input naming --port. " +
 			"The hostnames are written to the hosts file as 'doktunnel hosts sync' does, elevating once only when " +
-			"something changed (with --no-input: elevation_required and the command to run). If any address " +
+			"something changed (with --no-input: elevation_required and the command to run). On Linux, a port " +
+			"below the unprivileged port limit (net.ipv4.ip_unprivileged_port_start, 1024 by default), such as 80 " +
+			"or 443, is opened by the same privileged helper in that one elevation and handed to forward, which " +
+			"keeps running as you; with --no-input, without a terminal, or when elevation fails, it fails with " +
+			"elevation_required naming the address. If any address " +
 			"cannot be listened on, nothing is forwarded. Runs in the foreground until Ctrl+C or SIGTERM, then " +
 			"closes every tunnel, removes its hostnames from the hosts file unless another running forward uses " +
 			"them (elevating again when needed; with --no-input, or when elevation fails, it leaves them and warns " +
@@ -506,9 +511,18 @@ func (e *Env) serveForwards(contextName, companionURL string, client *forward.Cl
 	// and the sync recognize as stale.
 	defer func() { _ = runstate.Remove(stateDir, state.PID) }()
 
+	// Ports only root may listen on are opened by the privileged helper in
+	// the sync's elevation. Whatever forward does not end up serving is
+	// closed on the way out; a forwarder closes its own listener too.
+	ports := e.lowPorts(planned)
+	defer ports.closeAll()
 	ctx := context.Background()
-	synced, err := e.syncHosts(ctx, syncOptions{})
+	synced, err := e.syncHosts(ctx, syncOptions{ports: ports})
 	if err != nil {
+		if ports.needed() {
+			// The hosts file may have changed before the ports failed.
+			e.removeOwnHosts(stateDir, state.PID)
+		}
 		return err
 	}
 	if synced.Changed && !e.JSON {
@@ -533,6 +547,22 @@ func (e *Env) serveForwards(contextName, companionURL string, client *forward.Cl
 			WithHint(fmt.Sprintf("run: sudo /sbin/ifconfig lo0 alias %s up", missing[0]))
 	}
 
+	listen := e.Listen
+	if listen == nil {
+		listen = net.Listen
+	}
+	if len(ports.listeners) > 0 {
+		next := listen
+		listen = func(network, addr string) (net.Listener, error) {
+			if ap, err := netip.ParseAddrPort(addr); err == nil {
+				if ln := ports.listeners[ap]; ln != nil {
+					return ln, nil
+				}
+			}
+			return next(network, addr)
+		}
+	}
+
 	events := &eventPrinter{env: e}
 	var fwds []*forward.Forwarder
 	closeAll := func() {
@@ -546,7 +576,7 @@ func (e *Env) serveForwards(contextName, companionURL string, client *forward.Cl
 			Addr:    addr,
 			Target:  p.target.ref.Target(p.port),
 			OnEvent: events.handler(p),
-			Listen:  e.Listen,
+			Listen:  listen,
 		})
 		if err != nil {
 			closeAll()
@@ -582,6 +612,19 @@ func (e *Env) serveForwards(contextName, companionURL string, client *forward.Cl
 		e.warn("some tunnels did not close in time")
 	}
 	return nil
+}
+
+// lowPorts returns the planned addresses whose port needs administrator
+// privileges, each once.
+func (e *Env) lowPorts(planned []plannedForward) *lowPorts {
+	ports := &lowPorts{}
+	for _, p := range planned {
+		ap := netip.AddrPortFrom(p.ip, uint16(p.port))
+		if e.PrivilegedPort(p.port) && !slices.Contains(ports.addrs, ap) {
+			ports.addrs = append(ports.addrs, ap)
+		}
+	}
+	return ports
 }
 
 // removeOwnHosts removes this process's hostnames from the hosts file as it
