@@ -18,7 +18,7 @@ import (
 
 // fakeBroker stands in for lowport.System on every OS: Bind opens a
 // listener on a free port of 127.0.0.1 for each requested address, and Send
-// hands them, in-process, to the receiver with that name.
+// and Report deliver, in-process, to the receiver with that name.
 type fakeBroker struct {
 	mu        sync.Mutex
 	receivers map[string]*fakeReceiver
@@ -30,6 +30,8 @@ type fakeBroker struct {
 	sendUIDs []int
 	// failBind makes Bind fail like a port already in use.
 	failBind bool
+	// failSend makes Send connect but hang up before handing anything over.
+	failSend bool
 }
 
 func newFakeBroker() *fakeBroker {
@@ -41,7 +43,7 @@ func (b *fakeBroker) Open() (lowport.Receiver, error) {
 	if err != nil {
 		return nil, err
 	}
-	r := &fakeReceiver{name: name, ch: make(chan []lowport.Bound, 1)}
+	r := &fakeReceiver{name: name, ch: make(chan delivery, 1)}
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	b.receivers[name] = r
@@ -53,7 +55,7 @@ func (b *fakeBroker) Bind(addrs []netip.AddrPort) ([]lowport.Bound, error) {
 	defer b.mu.Unlock()
 	b.bound = append(b.bound, addrs...)
 	if b.failBind {
-		return nil, fmt.Errorf("listening on %s: address already in use", addrs[0])
+		return nil, &lowport.BindError{Addr: addrs[0], Err: errors.New("address already in use")}
 	}
 	var out []lowport.Bound
 	for _, a := range addrs {
@@ -75,14 +77,35 @@ func (b *fakeBroker) Send(name string, peerUID int, bound []lowport.Bound) error
 	if r == nil {
 		return errors.New("no receiver with that name")
 	}
+	if b.failSend {
+		r.ch <- delivery{}
+		return errors.New("sending the listener: broken pipe")
+	}
 	// The receiver gets the listeners themselves, as SCM_RIGHTS hands over
 	// duplicates of the helper's descriptors.
 	var sent []lowport.Bound
 	for _, bd := range bound {
 		sent = append(sent, lowport.Bound{Addr: bd.Addr, Listener: b.listeners[bd.Addr]})
 	}
-	r.ch <- sent
+	r.ch <- delivery{bound: sent}
 	return nil
+}
+
+func (b *fakeBroker) Report(name string, peerUID int, failure error) error {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	r := b.receivers[name]
+	if r == nil {
+		return errors.New("no receiver with that name")
+	}
+	r.ch <- delivery{failure: lowport.Failure(failure)}
+	return nil
+}
+
+// delivery is what one helper connection carries: listeners or a failure.
+type delivery struct {
+	bound   []lowport.Bound
+	failure *lowport.HelperError
 }
 
 // helperCopy is the helper's own descriptor of a listener: closing it, as
@@ -100,30 +123,40 @@ func (b *fakeBroker) listener(addr string) net.Listener {
 
 type fakeReceiver struct {
 	name string
-	ch   chan []lowport.Bound
+	ch   chan delivery
 }
 
 func (r *fakeReceiver) Name() string { return r.name }
 
 func (r *fakeReceiver) Close() error { return nil }
 
+// Receive, like the real one, still takes what the helper sent before the
+// caller stopped waiting.
 func (r *fakeReceiver) Receive(ctx context.Context, want []netip.AddrPort) (map[netip.AddrPort]net.Listener, error) {
+	var d delivery
 	select {
-	case bound := <-r.ch:
-		got := map[netip.AddrPort]net.Listener{}
-		for _, b := range bound {
-			got[b.Addr] = b.Listener
-		}
-		if len(got) != len(want) {
-			for _, ln := range got {
-				_ = ln.Close()
-			}
-			return nil, errors.New("wrong listeners")
-		}
-		return got, nil
+	case d = <-r.ch:
 	case <-ctx.Done():
-		return nil, ctx.Err()
+		select {
+		case d = <-r.ch:
+		default:
+			return nil, fmt.Errorf("%w: %w", lowport.ErrNoHelper, ctx.Err())
+		}
 	}
+	if d.failure != nil {
+		return nil, d.failure
+	}
+	got := map[netip.AddrPort]net.Listener{}
+	for _, b := range d.bound {
+		got[b.Addr] = b.Listener
+	}
+	if len(got) != len(want) {
+		for _, ln := range got {
+			_ = ln.Close()
+		}
+		return nil, fmt.Errorf("the privileged helper sent %d of %d listeners", len(got), len(want))
+	}
+	return got, nil
 }
 
 // isClosed reports whether ln no longer accepts; an open one times out.
@@ -252,7 +285,6 @@ func TestForward_LowPortWithoutPrompting(t *testing.T) {
 		{name: "no terminal", terminal: false},
 		{name: "--no-input with a hosts change", terminal: true, args: []string{"--no-input"}, setup: func(h *forwardHarness) { h.hosts.denyWrite = true }},
 		{name: "elevation refused", terminal: true, setup: func(h *forwardHarness) { h.hosts.elevator.fail = true }, calls: 1},
-		{name: "the helper cannot bind", terminal: true, setup: func(h *forwardHarness) { h.hosts.broker.failBind = true }, calls: 1},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -273,6 +305,57 @@ func TestForward_LowPortWithoutPrompting(t *testing.T) {
 			}
 			if len(h.hosts.elevator.calls) != tt.calls || len(h.requested()) != 0 {
 				t.Errorf("elevated %d times and listened on %q, want %d and nothing", len(h.hosts.elevator.calls), h.requested(), tt.calls)
+			}
+			if got := h.hosts.readHosts(); got != fixtureHosts {
+				t.Errorf("hosts file after the failure =\n%q\nwant it unchanged", got)
+			}
+		})
+	}
+}
+
+// TestForward_LowPortHelperFailsAfterElevation checks a helper that ran, so
+// the elevation worked, but could not open or hand over a port is not
+// reported as elevation_required: asking for the password again would not
+// help.
+func TestForward_LowPortHelperFailsAfterElevation(t *testing.T) {
+	tests := []struct {
+		name     string
+		setup    func(b *fakeBroker)
+		message  string
+		wantHint string
+	}{
+		{
+			name:     "the helper cannot bind",
+			setup:    func(b *fakeBroker) { b.failBind = true },
+			message:  "listening on 127.77.0.1:80: address already in use",
+			wantHint: "another process may already listen on 127.77.0.1:80; run 'doktunnel status'",
+		},
+		{
+			name:    "the helper cannot hand the listener over",
+			setup:   func(b *fakeBroker) { b.failSend = true },
+			message: "receiving the listeners from the privileged helper",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			h := lowPortHarness(t)
+			tt.setup(h.hosts.broker)
+			r := h.forward("", true, "myapp/pgadmin", "--json")
+			if want := clierr.Internal.ExitCode(); r.exit != want {
+				t.Fatalf("exit = %d, want %d (stdout %q)", r.exit, want, r.stdout)
+			}
+			e := decodeError(t, r.stdout)
+			if e.Code != clierr.Internal || !strings.Contains(e.Message, "127.77.0.1:80") || !strings.Contains(e.Message, tt.message) {
+				t.Errorf("error = %+v, want internal naming 127.77.0.1:80 and %q", e, tt.message)
+			}
+			if tt.wantHint != "" && !strings.Contains(e.Hint, tt.wantHint) {
+				t.Errorf("hint %q, want it to contain %q", e.Hint, tt.wantHint)
+			}
+			if strings.Contains(e.Hint, "terminal") || strings.Contains(e.Hint, "password") {
+				t.Errorf("hint %q asks to elevate again", e.Hint)
+			}
+			if len(h.hosts.elevator.calls) != 1 || len(h.requested()) != 0 {
+				t.Errorf("elevated %d times and listened on %q, want once and nothing", len(h.hosts.elevator.calls), h.requested())
 			}
 			if got := h.hosts.readHosts(); got != fixtureHosts {
 				t.Errorf("hosts file after the failure =\n%q\nwant it unchanged", got)

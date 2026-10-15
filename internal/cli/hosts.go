@@ -556,17 +556,38 @@ func (e *Env) runPrivilegedPorts(ctx context.Context, what string, withEntries b
 		defer stop.Stop()
 	}
 	r := <-done
-	if runErr != nil {
-		for _, ln := range r.listeners {
-			_ = ln.Close()
-		}
-		return clierr.Newf(clierr.ElevationRequired, "%s: %v", what, runErr).WithHint(e.portsHint())
+	if runErr == nil && r.err == nil {
+		ports.listeners = r.listeners
+		return nil
 	}
-	if r.err != nil {
-		return clierr.Newf(clierr.Internal, "%s: receiving the listeners from the privileged helper: %v", what, r.err)
+	for _, ln := range r.listeners {
+		_ = ln.Close()
 	}
-	ports.listeners = r.listeners
-	return nil
+	return helperPortsError(what, runErr, r.err, e.portsHint())
+}
+
+// helperPortsError explains why the helper's listeners did not arrive.
+// sudo's exit status alone cannot tell a refused elevation from a helper
+// that ran and failed, so the channel decides: only when nothing connected
+// to it (lowport.ErrNoHelper) did the elevation fail, and only then is the
+// error elevation_required with hint. A helper that connected ran as root,
+// so asking for the password again would not help: its failure is internal,
+// and a port it could not bind gets the hint of a busy high port.
+func helperPortsError(what string, runErr, recvErr error, hint string) error {
+	var he *lowport.HelperError
+	switch {
+	case runErr != nil && errors.Is(recvErr, lowport.ErrNoHelper):
+		return clierr.Newf(clierr.ElevationRequired, "%s: %v", what, runErr).WithHint(hint)
+	case errors.As(recvErr, &he) && he.Addr.IsValid():
+		return clierr.Newf(clierr.Internal, "%s: the privileged helper failed: %v", what, he).
+			WithHint(fmt.Sprintf("another process may already listen on %s; run 'doktunnel status' to see running forwards", he.Addr))
+	case he != nil:
+		return clierr.Newf(clierr.Internal, "%s: the privileged helper failed: %v", what, he)
+	case recvErr != nil:
+		return clierr.Newf(clierr.Internal, "%s: receiving the listeners from the privileged helper: %v", what, recvErr)
+	default:
+		return clierr.Newf(clierr.Internal, "%s: the privileged helper failed after handing over the listeners: %v", what, runErr)
+	}
 }
 
 // portsHint is the hint of an elevation_required error for low ports: a
@@ -745,8 +766,11 @@ type privilegedRequest struct {
 // limit on leased loopback addresses, and their listeners only go to a
 // process of the user who ran sudo. Everything is validated, and every port
 // bound, before the hosts file is written, since hosts.Write truncates it
-// first and a port in use must change nothing.
-func runHostsPrivilegedApply(env *Env, req privilegedRequest) error {
+// first and a port in use must change nothing. Once the channel and its
+// user are known, any failure before the listeners are sent is reported
+// over the channel too, so forward knows the elevation worked (see package
+// lowport).
+func runHostsPrivilegedApply(env *Env, req privilegedRequest) (err error) {
 	ctx := context.Background()
 	path := env.privilegedHostsPath()
 	if req.clean {
@@ -762,16 +786,30 @@ func runHostsPrivilegedApply(env *Env, req privilegedRequest) error {
 
 	var addrs []netip.AddrPort
 	var peerUID int
+	sending := false
+	// cause, when set, is the failure to report instead of err, keeping
+	// the address of a port the helper could not bind.
+	var cause error
 	if req.ports != "" {
-		var err error
-		if addrs, err = lowport.ParseAddrs(req.ports, env.PortLimit()); err != nil {
-			return clierr.Newf(clierr.InvalidArgument, "--ports: %v", err)
-		}
 		if !lowport.ValidName(req.socket) {
 			return clierr.New(clierr.InvalidArgument, "--socket: not a doktunnel channel name")
 		}
 		if peerUID, err = invokingUID(env); err != nil {
 			return err
+		}
+		defer func() {
+			// Send failed after connecting, or could not connect, so a
+			// report would not reach forward either.
+			if err != nil && !sending {
+				failure := err
+				if cause != nil {
+					failure = cause
+				}
+				_ = env.PortBroker.Report(req.socket, peerUID, failure)
+			}
+		}()
+		if addrs, err = lowport.ParseAddrs(req.ports, env.PortLimit()); err != nil {
+			return clierr.Newf(clierr.InvalidArgument, "--ports: %v", err)
 		}
 	}
 
@@ -794,6 +832,7 @@ func runHostsPrivilegedApply(env *Env, req privilegedRequest) error {
 	if len(addrs) > 0 {
 		var err error
 		if bound, err = env.PortBroker.Bind(addrs); err != nil {
+			cause = err
 			return clierr.New(clierr.Internal, err.Error())
 		}
 		// The forward process holds its own copies once they are sent.
@@ -824,6 +863,7 @@ func runHostsPrivilegedApply(env *Env, req privilegedRequest) error {
 	}
 
 	if len(bound) > 0 {
+		sending = true
 		if err := env.PortBroker.Send(req.socket, peerUID, bound); err != nil {
 			return clierr.New(clierr.Internal, err.Error())
 		}

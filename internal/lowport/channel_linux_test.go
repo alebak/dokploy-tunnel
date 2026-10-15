@@ -9,6 +9,7 @@ import (
 	"net"
 	"net/netip"
 	"os"
+	"strings"
 	"testing"
 	"time"
 )
@@ -216,5 +217,94 @@ func TestSend_RefusesInvalidName(t *testing.T) {
 	ln, a := listenAny(t)
 	if err := send("../../etc/passwd", os.Getuid(), []Bound{{Addr: a, Listener: ln}}); !errors.Is(err, ErrInvalid) {
 		t.Fatalf("send with an invalid name: %v, want ErrInvalid", err)
+	}
+}
+
+// TestChannel_ReportsFailure shows a helper failure travels to the forward
+// process as a HelperError naming the address it could not bind.
+func TestChannel_ReportsFailure(t *testing.T) {
+	uid := os.Getuid()
+	recv, err := openReceiver(uid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer recv.Close()
+	a := netip.MustParseAddrPort("127.77.0.1:80")
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	done := make(chan error, 1)
+	go func() {
+		got, err := recv.Receive(ctx, []netip.AddrPort{a})
+		if got != nil {
+			err = errors.New("listeners returned with the error")
+		}
+		done <- err
+	}()
+	failure := &BindError{Addr: a, Err: errors.New("address already in use")}
+	if err := report(recv.Name(), uid, failure); err != nil {
+		t.Fatalf("report: %v", err)
+	}
+	err = <-done
+	var he *HelperError
+	if !errors.As(err, &he) {
+		t.Fatalf("Receive error = %v, want a HelperError", err)
+	}
+	if he.Addr != a || he.Error() != failure.Error() {
+		t.Errorf("HelperError = {%v, %q}, want {%v, %q}", he.Addr, he.Error(), a, failure.Error())
+	}
+}
+
+// TestReceive_TakesReportQueuedBeforeTheEnd shows a report the helper sent
+// before it exited is read even when the caller stops waiting before
+// Receive first looks: the caller only stops once the helper has exited.
+func TestReceive_TakesReportQueuedBeforeTheEnd(t *testing.T) {
+	uid := os.Getuid()
+	recv, err := openReceiver(uid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer recv.Close()
+	if err := report(recv.Name(), uid, errors.New("writing the hosts file: read-only file system")); err != nil {
+		t.Fatalf("report: %v", err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	_, err = recv.Receive(ctx, []netip.AddrPort{netip.MustParseAddrPort("127.77.0.1:80")})
+	var he *HelperError
+	if !errors.As(err, &he) || he.Addr.IsValid() || !strings.Contains(he.Error(), "read-only file system") {
+		t.Fatalf("Receive error = %v, want the helper's report without an address", err)
+	}
+	if errors.Is(err, ErrNoHelper) {
+		t.Errorf("Receive error %v says the helper never connected", err)
+	}
+}
+
+// TestReceive_NoHelper shows a channel nobody connected to ends with
+// ErrNoHelper, which is how forward tells a refused elevation apart.
+func TestReceive_NoHelper(t *testing.T) {
+	recv, err := openReceiver(os.Getuid())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer recv.Close()
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	_, err = recv.Receive(ctx, []netip.AddrPort{netip.MustParseAddrPort("127.77.0.1:80")})
+	if !errors.Is(err, ErrNoHelper) || !errors.Is(err, context.Canceled) {
+		t.Fatalf("Receive error = %v, want ErrNoHelper with the context's error", err)
+	}
+}
+
+// TestReport_RejectsWrongPeer shows the helper reports nothing to a receiver
+// that does not run as the user who invoked sudo.
+func TestReport_RejectsWrongPeer(t *testing.T) {
+	recv, err := openReceiver(os.Getuid())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer recv.Close()
+	if err := report(recv.Name(), os.Getuid()+1, errors.New("boom")); !errors.Is(err, ErrPeer) {
+		t.Fatalf("report to a receiver with the wrong uid: %v, want ErrPeer", err)
 	}
 }

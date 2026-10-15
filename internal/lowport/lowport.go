@@ -16,6 +16,14 @@
 // the forward process only takes sockets from root, and the helper only
 // hands them to the user who ran sudo.
 //
+// sudo only returns the helper's exit status, which cannot tell a refused
+// elevation (wrong password, no terminal) from a helper that ran and
+// failed. The channel can: a helper that fails once it knows the channel
+// connects and reports the failure (see Broker.Report) before it exits, and
+// Receive takes anything the helper queued even after the caller stopped
+// waiting. So a connection from root proves the elevation worked, and
+// Receive returns ErrNoHelper only when nothing connected.
+//
 // Outside Linux, Privileged always reports false and System's methods fail
 // with ErrUnsupported. Windows lets users bind low ports. macOS lets a user
 // other than root bind them only on the wildcard address, which forward
@@ -62,7 +70,49 @@ var (
 	// ErrUnsupported means this system has no low-port channel; it never
 	// needs one.
 	ErrUnsupported = errors.New("listening through the privileged helper is only supported on Linux")
+	// ErrNoHelper means the helper never connected to the channel: the
+	// elevation did not run it.
+	ErrNoHelper = errors.New("the privileged helper never connected")
 )
+
+// maxFailure bounds the text of a reported failure, in bytes.
+const maxFailure = 400
+
+// BindError is a failure to listen on one requested address.
+type BindError struct {
+	Addr netip.AddrPort
+	Err  error
+}
+
+func (e *BindError) Error() string { return fmt.Sprintf("listening on %s: %v", e.Addr, e.Err) }
+
+func (e *BindError) Unwrap() error { return e.Err }
+
+// HelperError is a failure the privileged helper reported over the
+// channel: it ran, so the elevation worked, but it could not finish.
+type HelperError struct {
+	// Addr is the address the helper could not listen on, when that was
+	// the failure; otherwise it is the zero value.
+	Addr netip.AddrPort
+	// Msg is the helper's error message, at most maxFailure bytes.
+	Msg string
+}
+
+func (e *HelperError) Error() string { return e.Msg }
+
+// Failure returns the HelperError the forward process receives when the
+// helper reports err.
+func Failure(err error) *HelperError {
+	he := &HelperError{Msg: strings.ToValidUTF8(err.Error(), "?")}
+	if len(he.Msg) > maxFailure {
+		he.Msg = strings.ToValidUTF8(he.Msg[:maxFailure], "")
+	}
+	var be *BindError
+	if errors.As(err, &be) {
+		he.Addr = be.Addr
+	}
+	return he
+}
 
 // Bound is a listener the helper opened for a requested address.
 type Bound struct {
@@ -77,7 +127,10 @@ type Receiver interface {
 	// Receive waits for the helper to connect and send a listener for
 	// every address in want, and returns them keyed by address. It fails,
 	// returning no listener, if anything else arrives, if the helper hangs
-	// up before sending them all, or when ctx ends.
+	// up before sending them all, with a *HelperError if the helper
+	// reported a failure, or when ctx ends. When ctx ends it still takes a
+	// connection the helper already made; it wraps ErrNoHelper only when
+	// there was none.
 	Receive(ctx context.Context, want []netip.AddrPort) (map[netip.AddrPort]net.Listener, error)
 	// Close stops receiving and removes the channel.
 	Close() error
@@ -94,11 +147,16 @@ type Broker interface {
 	// Send hands bound to the receiver called name, which must run as
 	// peerUID, the user who invoked the helper.
 	Send(name string, peerUID int, bound []Bound) error
+	// Report tells the receiver called name, which must run as peerUID,
+	// that the helper failed with failure; Receive returns it as a
+	// *HelperError.
+	Report(name string, peerUID int, failure error) error
 }
 
 // ParseAddrs parses a comma-separated "<ip>:<port>" list, as FormatAddrs
 // writes it, and validates it strictly: one to MaxAddrs addresses, each in
-// registry.DefaultRange with a port from 1 to limit-1, none repeated. The
+// registry.DefaultRange with a port from 1 to limit-1, none repeated; with a
+// limit of 1 or less no port is valid. The
 // privileged helper uses it, so errors name the position of a bad element,
 // never its contents.
 func ParseAddrs(list string, limit int) ([]netip.AddrPort, error) {
@@ -106,6 +164,9 @@ func ParseAddrs(list string, limit int) ([]netip.AddrPort, error) {
 		return nil, fmt.Errorf("%w: no address", ErrInvalid)
 	}
 	parts := strings.Split(list, ",")
+	if limit <= 1 {
+		return nil, fmt.Errorf("%w: no port needs privileges on this system", ErrInvalid)
+	}
 	if len(parts) > MaxAddrs {
 		return nil, fmt.Errorf("%w: more than %d addresses", ErrInvalid, MaxAddrs)
 	}

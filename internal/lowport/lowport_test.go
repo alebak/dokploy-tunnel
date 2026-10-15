@@ -78,6 +78,20 @@ func TestParseAddrs_Refused(t *testing.T) {
 	}
 }
 
+// TestParseAddrs_NoPrivilegedPort checks the message when the system lets
+// users bind every port, so no port is valid for the helper.
+func TestParseAddrs_NoPrivilegedPort(t *testing.T) {
+	for _, limit := range []int{0, 1} {
+		_, err := ParseAddrs("127.77.0.5:80", limit)
+		if !errors.Is(err, ErrInvalid) {
+			t.Fatalf("ParseAddrs with limit %d: %v, want ErrInvalid", limit, err)
+		}
+		if msg := err.Error(); !strings.Contains(msg, "no port needs privileges on this system") || strings.Contains(msg, "from 1 to") {
+			t.Errorf("ParseAddrs with limit %d: %q, want it to say no port needs privileges", limit, msg)
+		}
+	}
+}
+
 // TestParseAddrs_ErrorsDoNotEchoInput checks that the helper, which runs as
 // root, never repeats what it was handed.
 func TestParseAddrs_ErrorsDoNotEchoInput(t *testing.T) {

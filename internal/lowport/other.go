@@ -22,3 +22,5 @@ func (unsupported) Open() (Receiver, error) { return nil, ErrUnsupported }
 func (unsupported) Bind([]netip.AddrPort) ([]Bound, error) { return nil, ErrUnsupported }
 
 func (unsupported) Send(string, int, []Bound) error { return ErrUnsupported }
+
+func (unsupported) Report(string, int, error) error { return ErrUnsupported }

@@ -10,13 +10,26 @@ import (
 	"net"
 	"net/netip"
 	"os"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
 )
 
-// maxMessage bounds one channel message: an address with its port.
-const maxMessage = 64
+// maxMessage bounds one channel message: an address with its port, or a
+// failure report.
+const maxMessage = 512
+
+// failPrefix starts a failure report, which carries no descriptor: the
+// address the helper could not bind (or nothing), a NUL, then the message.
+// An address never starts with a NUL, so the two kinds cannot be confused.
+const failPrefix = "\x00fail\x00"
+
+// lateReadTimeout bounds reading a connection once the caller stopped
+// waiting. The helper has exited by then, so its messages are already
+// queued and the read ends at once; the bound only covers a helper that
+// somehow outlived sudo.
+const lateReadTimeout = 2 * time.Second
 
 // Privileged returns whether binding a port needs administrator privileges
 // for this process: on Linux, every port below Limit unless the process
@@ -41,6 +54,10 @@ func (system) Bind(addrs []netip.AddrPort) ([]Bound, error) { return bind(addrs)
 
 func (system) Send(name string, wantUID int, bound []Bound) error {
 	return send(name, wantUID, bound)
+}
+
+func (system) Report(name string, wantUID int, failure error) error {
+	return report(name, wantUID, failure)
 }
 
 // receiver listens on an abstract SOCK_SEQPACKET socket, which keeps every
@@ -77,27 +94,37 @@ func (r *receiver) Close() error { return r.ln.Close() }
 // Receive implements Receiver. A peer with another uid is dropped and the
 // receiver keeps waiting, so a local user who finds the name cannot keep
 // the helper's connection out.
+//
+// The caller ends ctx once the helper has exited, so whatever the helper
+// sent is already queued then: Receive stops blocking but still takes a
+// queued connection, and reads it with a short bound instead of dropping
+// it. That is how a failure the helper reported is never mistaken for a
+// helper that never ran.
 func (r *receiver) Receive(ctx context.Context, want []netip.AddrPort) (map[netip.AddrPort]net.Listener, error) {
 	var mu sync.Mutex
 	var current *net.UnixConn
 	stop := context.AfterFunc(ctx, func() {
 		mu.Lock()
 		defer mu.Unlock()
-		past := time.Unix(1, 0)
-		_ = r.ln.SetDeadline(past)
+		_ = r.ln.SetDeadline(time.Unix(1, 0))
 		if current != nil {
-			_ = current.SetDeadline(past)
+			_ = current.SetDeadline(time.Now().Add(lateReadTimeout))
 		}
 	})
 	defer stop()
 
 	for {
-		c, err := r.ln.AcceptUnix()
-		if err != nil {
-			if ctx.Err() != nil {
-				return nil, fmt.Errorf("waiting for the privileged helper: %w", ctx.Err())
+		var c *net.UnixConn
+		if ctx.Err() == nil {
+			var err error
+			if c, err = r.ln.AcceptUnix(); err != nil && ctx.Err() == nil {
+				return nil, fmt.Errorf("waiting for the privileged helper: %w", err)
 			}
-			return nil, fmt.Errorf("waiting for the privileged helper: %w", err)
+		}
+		if c == nil {
+			if c = r.acceptQueued(); c == nil {
+				return nil, fmt.Errorf("%w: %w", ErrNoHelper, ctx.Err())
+			}
 		}
 		if uid, err := peerUID(c); err != nil || uid != r.wantUID {
 			_ = c.Close()
@@ -106,7 +133,7 @@ func (r *receiver) Receive(ctx context.Context, want []netip.AddrPort) (map[neti
 		mu.Lock()
 		current = c
 		if ctx.Err() != nil {
-			_ = c.SetDeadline(time.Unix(1, 0))
+			_ = c.SetDeadline(time.Now().Add(lateReadTimeout))
 		}
 		mu.Unlock()
 		got, err := readListeners(c, want)
@@ -118,8 +145,38 @@ func (r *receiver) Receive(ctx context.Context, want []netip.AddrPort) (map[neti
 	}
 }
 
+// acceptQueued takes a connection already waiting on the channel without
+// blocking, or returns nil when there is none.
+func (r *receiver) acceptQueued() *net.UnixConn {
+	rc, err := r.ln.SyscallConn()
+	if err != nil {
+		return nil
+	}
+	nfd, acceptErr := -1, error(nil)
+	if err := rc.Control(func(fd uintptr) {
+		// The listener's descriptor is non-blocking, so an empty queue
+		// fails with EAGAIN.
+		nfd, _, acceptErr = syscall.Accept4(int(fd), syscall.SOCK_CLOEXEC|syscall.SOCK_NONBLOCK)
+	}); err != nil || acceptErr != nil {
+		return nil
+	}
+	f := os.NewFile(uintptr(nfd), "low-port channel")
+	c, err := net.FileConn(f)
+	_ = f.Close()
+	if err != nil {
+		return nil
+	}
+	uc, ok := c.(*net.UnixConn)
+	if !ok {
+		_ = c.Close()
+		return nil
+	}
+	return uc
+}
+
 // readListeners reads one message per address in want, each holding the
-// address and exactly one descriptor listening on it. On any error it
+// address and exactly one descriptor listening on it, unless the first
+// message is a failure report, returned as a *HelperError. On any error it
 // closes every descriptor it received.
 func readListeners(c *net.UnixConn, want []netip.AddrPort) (map[netip.AddrPort]net.Listener, error) {
 	wanted := make(map[netip.AddrPort]bool, len(want))
@@ -145,6 +202,13 @@ func readListeners(c *net.UnixConn, want []netip.AddrPort) (map[netip.AddrPort]n
 		fds, rightsErr := parseRights(oob[:oobn])
 		if n == 0 && oobn == 0 {
 			return fail(fmt.Errorf("the privileged helper sent %d of %d listeners", len(got), len(want)))
+		}
+		if rest, ok := strings.CutPrefix(string(buf[:n]), failPrefix); ok {
+			closeFDs(fds)
+			if len(got) > 0 || len(fds) > 0 || rightsErr != nil || flags&(syscall.MSG_TRUNC|syscall.MSG_CTRUNC) != 0 {
+				return fail(errors.New("the privileged helper sent a malformed message"))
+			}
+			return fail(parseFailure(rest))
 		}
 		ap, addrErr := netip.ParseAddrPort(string(buf[:n]))
 		switch {
@@ -224,6 +288,22 @@ func peerUID(c *net.UnixConn) (int, error) {
 	return int(cred.Uid), nil
 }
 
+// parseFailure decodes the body of a failure report, after failPrefix.
+func parseFailure(body string) *HelperError {
+	addr, msg, _ := strings.Cut(body, "\x00")
+	if len(msg) > maxFailure {
+		msg = msg[:maxFailure]
+	}
+	he := &HelperError{Msg: strings.ToValidUTF8(msg, "?")}
+	if ap, err := netip.ParseAddrPort(addr); err == nil {
+		he.Addr = ap
+	}
+	if he.Msg == "" {
+		he.Msg = "the privileged helper failed"
+	}
+	return he
+}
+
 // bind listens on every address, closing them all if one fails.
 func bind(addrs []netip.AddrPort) ([]Bound, error) {
 	out := make([]Bound, 0, len(addrs))
@@ -233,7 +313,7 @@ func bind(addrs []netip.AddrPort) ([]Bound, error) {
 			for _, b := range out {
 				_ = b.Listener.Close()
 			}
-			return nil, fmt.Errorf("listening on %s: %w", a, err)
+			return nil, &BindError{Addr: a, Err: err}
 		}
 		out = append(out, Bound{Addr: a, Listener: ln})
 	}
@@ -244,21 +324,11 @@ func bind(addrs []netip.AddrPort) ([]Bound, error) {
 // run as wantUID, sends one message per listener: the address, with the
 // descriptor attached.
 func send(name string, wantUID int, bound []Bound) error {
-	if !ValidName(name) {
-		return fmt.Errorf("%w: not a doktunnel channel name", ErrInvalid)
-	}
-	c, err := net.DialUnix("unixpacket", nil, abstractAddr(name))
+	c, err := connect(name, wantUID)
 	if err != nil {
-		return fmt.Errorf("connecting to the forward process: %w", err)
+		return err
 	}
 	defer c.Close()
-	uid, err := peerUID(c)
-	if err != nil {
-		return fmt.Errorf("checking the forward process: %w", err)
-	}
-	if uid != wantUID {
-		return fmt.Errorf("%w: the channel belongs to uid %d, not %d", ErrPeer, uid, wantUID)
-	}
 	for _, b := range bound {
 		sc, ok := b.Listener.(syscall.Conn)
 		if !ok {
@@ -279,4 +349,45 @@ func send(name string, wantUID int, bound []Bound) error {
 		}
 	}
 	return nil
+}
+
+// report connects to the channel called name and, once its owner proves to
+// run as wantUID, sends failure as one message without a descriptor.
+func report(name string, wantUID int, failure error) error {
+	c, err := connect(name, wantUID)
+	if err != nil {
+		return err
+	}
+	defer c.Close()
+	he := Failure(failure)
+	addr := ""
+	if he.Addr.IsValid() {
+		addr = he.Addr.String()
+	}
+	if _, _, err := c.WriteMsgUnix([]byte(failPrefix+addr+"\x00"+he.Msg), nil, nil); err != nil {
+		return fmt.Errorf("reporting a failure to the forward process: %w", err)
+	}
+	return nil
+}
+
+// connect dials the channel called name and checks its owner runs as
+// wantUID.
+func connect(name string, wantUID int) (*net.UnixConn, error) {
+	if !ValidName(name) {
+		return nil, fmt.Errorf("%w: not a doktunnel channel name", ErrInvalid)
+	}
+	c, err := net.DialUnix("unixpacket", nil, abstractAddr(name))
+	if err != nil {
+		return nil, fmt.Errorf("connecting to the forward process: %w", err)
+	}
+	uid, err := peerUID(c)
+	if err != nil {
+		_ = c.Close()
+		return nil, fmt.Errorf("checking the forward process: %w", err)
+	}
+	if uid != wantUID {
+		_ = c.Close()
+		return nil, fmt.Errorf("%w: the channel belongs to uid %d, not %d", ErrPeer, uid, wantUID)
+	}
+	return c, nil
 }
