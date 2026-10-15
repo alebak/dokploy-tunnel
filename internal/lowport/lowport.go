@@ -16,9 +16,11 @@
 // the forward process only takes sockets from root, and the helper only
 // hands them to the user who ran sudo.
 //
-// Other systems let users bind low ports on loopback, so nothing there needs
-// privileges: Privileged always reports false and System's methods fail with
-// ErrUnsupported.
+// Outside Linux, Privileged always reports false and System's methods fail
+// with ErrUnsupported. Windows lets users bind low ports. macOS lets a user
+// other than root bind them only on the wildcard address, which forward
+// never uses, so low ports on macOS still fail; the platform tests record
+// it.
 package lowport
 
 import (

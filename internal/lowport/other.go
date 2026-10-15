@@ -5,7 +5,8 @@ package lowport
 import "net/netip"
 
 // Privileged returns whether binding a port needs administrator privileges
-// for this process. Outside Linux, loopback ports never do.
+// for this process. Outside Linux it always reports false: Windows needs
+// none, and on macOS the helper cannot open them (see the package comment).
 func Privileged() func(port int) bool {
 	return func(int) bool { return false }
 }

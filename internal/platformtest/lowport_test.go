@@ -30,7 +30,8 @@ var lowProbeAddr = netip.MustParseAddr("127.77.252.1")
 // listens on a leased address and hands the socket to this unprivileged
 // process, which then accepts a connection on it. On macOS and Windows, the
 // design assumes a normal process may listen on such a port on loopback
-// itself, so nothing is elevated there; this checks that assumption.
+// itself, so nothing is elevated there; this checks that assumption, which
+// holds on Windows and does not on macOS (see lowPortOnMacOS).
 func TestLowPort_ListensBelowTheUnprivilegedLimit(t *testing.T) {
 	requirePlatform(t)
 	if runtime.GOOS == "linux" {
@@ -120,34 +121,61 @@ func lowPortThroughHelper(t *testing.T) {
 }
 
 func lowPortDirectly(t *testing.T) {
-	addrs := []netip.AddrPort{netip.AddrPortFrom(netip.MustParseAddr("127.0.0.1"), lowProbePort)}
-	if runtime.GOOS == "windows" {
-		// Windows answers the whole leased range natively; macOS only
-		// after a lo0 alias, which the loopback probe covers.
-		addrs = append(addrs, netip.AddrPortFrom(lowProbeAddr, lowProbePort))
-	}
 	if lowport.Privileged()(lowProbePort) {
 		t.Fatalf("lowport.Privileged reports port %d as privileged on %s", lowProbePort, runtime.GOOS)
 	}
-	for _, ap := range addrs {
-		ln, err := net.Listen("tcp", ap.String())
-		if err != nil {
+	if runtime.GOOS == "darwin" {
+		lowPortOnMacOS(t)
+		return
+	}
+	// Windows answers the whole leased range natively.
+	for _, ap := range []netip.AddrPort{
+		netip.AddrPortFrom(netip.MustParseAddr("127.0.0.1"), lowProbePort),
+		netip.AddrPortFrom(lowProbeAddr, lowProbePort),
+	} {
+		if err := listenAndEcho(ap); err != nil {
 			finding(t, "%s refused to listen on %s without elevation (%v); low ports need the privileged helper here too", runtime.GOOS, ap, err)
-			t.Fatalf("listening on %s: %v", ap, err)
+			t.Fatal(err)
 		}
-		err = echo(ln, ap.String())
-		_ = ln.Close()
-		if err != nil {
-			t.Fatalf("connecting to %s: %v", ap, err)
-		}
-		report(t, "the test process listened on %s and accepted a connection without elevation%s", ap, elevationNote())
+		report(t, "the test process listened on %s and accepted a connection without elevation (the runner is an elevated Administrator, "+
+			"so this does not prove what a standard user may do; Windows has no privileged port range)", ap)
 	}
 }
 
-// elevationNote qualifies a result on a runner that is already elevated.
-func elevationNote() string {
-	if runtime.GOOS == "windows" {
-		return " (the runner is an elevated Administrator, so this does not prove what a standard user may do; Windows has no privileged port range)"
+// lowPortOnMacOS records what the first run of this test found: since
+// macOS 10.14 a user other than root may listen on a port below 1024 only on
+// the wildcard address, not on a specific one such as 127.0.0.1 or a lo0
+// alias. forward listens on a specific loopback address, so on macOS a port
+// below 1024 still fails with "permission denied"; the privileged helper
+// only opens low ports on Linux. The test fails if that changes, so the
+// README and the helper can follow.
+func lowPortOnMacOS(t *testing.T) {
+	specific := netip.AddrPortFrom(netip.MustParseAddr("127.0.0.1"), lowProbePort)
+	if err := listenAndEcho(specific); err == nil {
+		t.Fatalf("macOS now lets the runner user listen on %s; update the README and consider dropping this check", specific)
+	} else if !errors.Is(err, fs.ErrPermission) {
+		t.Fatalf("listening on %s: %v, want permission denied", specific, err)
 	}
-	return " (the runner user is not root)"
+	finding(t, "macOS refused to listen on %s as the runner user (not root); forward cannot mirror ports below 1024 on macOS, where the privileged helper does not open them", specific)
+
+	wildcard := netip.AddrPortFrom(netip.IPv4Unspecified(), lowProbePort)
+	if err := listenAndEcho(wildcard); err != nil {
+		report(t, "the runner user cannot listen on %s either (%v)", wildcard, err)
+		return
+	}
+	report(t, "the runner user can listen on %s, the wildcard address forward never uses", wildcard)
+}
+
+// listenAndEcho listens on ap and proves a client can connect through it.
+func listenAndEcho(ap netip.AddrPort) error {
+	ln, err := net.Listen("tcp", ap.String())
+	if err != nil {
+		return err
+	}
+	defer ln.Close()
+	dial := ap
+	if ap.Addr().IsUnspecified() {
+		dial = netip.AddrPortFrom(netip.MustParseAddr("127.0.0.1"), ap.Port())
+	}
+	return echo(ln, dial.String())
 }
