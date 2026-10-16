@@ -30,7 +30,7 @@ free_disk() {
 
 install_dokploy() {
 	log "installing Dokploy $DOKPLOY_VERSION"
-	curl -fsSL https://dokploy.com/install.sh -o "$E2E_DIR/install.sh"
+	curl -fsSL --max-time 60 https://dokploy.com/install.sh -o "$E2E_DIR/install.sh"
 	# ADVERTISE_ADDR skips install.sh's lookup of the public IP. The log is
 	# written as this user, on purpose.
 	# shellcheck disable=SC2024
@@ -43,14 +43,14 @@ dokploy_service_ready() {
 	docker service ls --filter name=dokploy --format '{{.Name}} {{.Replicas}}' | grep -q '^dokploy 1/1'
 }
 
-panel_up() { curl -fsS -o /dev/null "$DOKPLOY_URL"; }
+panel_up() { curl -fsS --max-time 10 -o /dev/null "$DOKPLOY_URL"; }
 
 # better-auth only accepts a sign-up while no owner exists; the panel may
 # answer before its API does, so it is retried.
 sign_up() {
 	: >"$COOKIE_JAR"
 	chmod 600 "$COOKIE_JAR"
-	curl -fsS -o "$E2E_DIR/sign-up.json" -X POST "$DOKPLOY_URL/api/auth/sign-up/email" \
+	curl -fsS --max-time 30 -o "$E2E_DIR/sign-up.json" -X POST "$DOKPLOY_URL/api/auth/sign-up/email" \
 		-H 'Content-Type: application/json' -c "$COOKIE_JAR" -b "$COOKIE_JAR" \
 		--data "$(jq -cn --arg email "$ADMIN_EMAIL" --arg password "$ADMIN_PASSWORD" \
 			'{name: "E2E Admin", email: $email, password: $password}')" &&
@@ -73,7 +73,7 @@ create_api_key() {
 	(umask 077 && printf '%s\n' "$key" >"$E2E_DIR/api-key")
 
 	# The key alone, without the session, must read the organization.
-	curl -fsS -o /dev/null -H "x-api-key: $key" "$DOKPLOY_URL/api/trpc/project.all" ||
+	curl -fsS --max-time 30 -o /dev/null -H "x-api-key: $key" "$DOKPLOY_URL/api/trpc/project.all" ||
 		fail "the new API key cannot call project.all"
 	pass "API key created for organization $org_id and accepted by project.all"
 }

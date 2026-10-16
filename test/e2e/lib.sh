@@ -83,11 +83,11 @@ trpc() {
 	local method=$1 procedure=$2 input=$3 body status
 	body="$(jq -cn --argjson input "$input" '{json: $input}')"
 	if [[ $method == GET ]]; then
-		status="$(curl -sS -G -o "$E2E_DIR/last-response.json" -w '%{http_code}' \
+		status="$(curl -sS --max-time 30 -G -o "$E2E_DIR/last-response.json" -w '%{http_code}' \
 			-b "$COOKIE_JAR" -c "$COOKIE_JAR" \
 			--data-urlencode "input=$body" "$DOKPLOY_URL/api/trpc/$procedure")"
 	else
-		status="$(curl -sS -X POST -o "$E2E_DIR/last-response.json" -w '%{http_code}' \
+		status="$(curl -sS --max-time 30 -X POST -o "$E2E_DIR/last-response.json" -w '%{http_code}' \
 			-b "$COOKIE_JAR" -c "$COOKIE_JAR" -H 'Content-Type: application/json' \
 			--data "$body" "$DOKPLOY_URL/api/trpc/$procedure")"
 	fi

@@ -62,7 +62,7 @@ postgres_ready() {
 	[[ -n $container ]] && docker exec "$container" pg_isready -q -U "$PG_USER" -d "$PG_DATABASE"
 }
 
-companion_healthy() { curl -fsS -o /dev/null "http://$ip/doktunnel/healthz"; }
+companion_healthy() { curl -fsS --max-time 10 -o /dev/null "http://$ip/doktunnel/healthz"; }
 
 # The internal-network variant of the companion's compose file.
 companion_compose_file() {

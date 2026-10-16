@@ -35,7 +35,7 @@ jobs:
   scope:
     name: e2e scope
     if: ${{ github.event_name == 'pull_request' }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 5
     outputs:
       run: ${{ steps.scope.outputs.run }}
@@ -55,7 +55,7 @@ jobs:
     name: dokploy e2e
     needs: scope
     if: ${{ !cancelled() && (github.event_name == 'workflow_dispatch' || needs.scope.outputs.run == 'true') }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 25
     env:
       # The pinned Dokploy release, unless a manual run asks for another.
@@ -71,24 +71,32 @@ jobs:
           go-version-file: go.mod
 
       - name: Install Dokploy, its first admin and an API key
+        timeout-minutes: 6
         run: test/e2e/install-dokploy.sh
 
       - name: Build the companion image from this branch
+        timeout-minutes: 4
         run: test/e2e/build-companion.sh
 
       - name: Deploy Postgres, a compose stack and the companion through Dokploy
+        timeout-minutes: 6
         run: test/e2e/deploy-services.sh
 
       # gnome-keyring is the Secret Service the CLI keeps the API key in.
       - name: Install the test clients
+        timeout-minutes: 2
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y -qq --no-install-recommends gnome-keyring postgresql-client >/dev/null
           psql --version
 
       - name: Run doktunnel end to end
+        timeout-minutes: 4
         run: dbus-run-session -- test/e2e/run-cli.sh
 
+      # Step timeouts fail the step, so diagnostics still run; a job that
+      # reaches its own timeout is cancelled and would skip them.
       - name: Diagnostics
-        if: ${{ failure() }}
+        if: ${{ failure() || cancelled() }}
+        timeout-minutes: 2
         run: test/e2e/diagnostics.sh
