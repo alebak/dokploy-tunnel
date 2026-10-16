@@ -1,0 +1,94 @@
+name: e2e
+
+# Runs doktunnel end to end against a real Dokploy installed on a disposable
+# GitHub runner: Dokploy's install.sh at a pinned version, the first admin
+# and an API key through its API, a Postgres database and a compose stack,
+# the companion built from this branch and deployed as the install guide
+# describes (internal-network variant), and the CLI from this branch running
+# context add, services, forward, status and real connections through the
+# .internal hostnames. The steps live in test/e2e/*.sh; never run them on a
+# workstation (see CONTRIBUTING.md).
+#
+# It runs on demand, and on pull requests that touch the companion, the
+# repeater, the socket proxy, the forward path or the deployment
+# (test/e2e/scope.sh decides), and on every release-please pull request.
+# release-please opens its PR with GITHUB_TOKEN, which starts no workflows:
+# close and reopen the release PR to run the checks on it.
+
+on:
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      dokploy_version:
+        description: Dokploy release tag to install, such as v0.30.8 (empty for the pinned default)
+        required: false
+        default: ""
+
+permissions:
+  contents: read
+
+concurrency:
+  group: e2e-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  scope:
+    name: e2e scope
+    if: ${{ github.event_name == 'pull_request' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      run: ${{ steps.scope.outputs.run }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - id: scope
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          HEAD_REF: ${{ github.head_ref }}
+        run: test/e2e/scope.sh >>"$GITHUB_OUTPUT"
+
+  e2e:
+    name: dokploy e2e
+    needs: scope
+    if: ${{ !cancelled() && (github.event_name == 'workflow_dispatch' || needs.scope.outputs.run == 'true') }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    env:
+      # The pinned Dokploy release, unless a manual run asks for another.
+      DOKPLOY_VERSION: ${{ inputs.dokploy_version || 'v0.30.8' }}
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Lint the e2e scripts
+        run: shellcheck -x test/e2e/*.sh
+
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+
+      - name: Install Dokploy, its first admin and an API key
+        run: test/e2e/install-dokploy.sh
+
+      - name: Build the companion image from this branch
+        run: test/e2e/build-companion.sh
+
+      - name: Deploy Postgres, a compose stack and the companion through Dokploy
+        run: test/e2e/deploy-services.sh
+
+      # gnome-keyring is the Secret Service the CLI keeps the API key in.
+      - name: Install the test clients
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq --no-install-recommends gnome-keyring postgresql-client >/dev/null
+          psql --version
+
+      - name: Run doktunnel end to end
+        run: dbus-run-session -- test/e2e/run-cli.sh
+
+      - name: Diagnostics
+        if: ${{ failure() }}
+        run: test/e2e/diagnostics.sh
