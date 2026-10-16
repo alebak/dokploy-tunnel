@@ -54,8 +54,10 @@ context_add() {
 	jq . "$out/context-add.json"
 	jq -e --arg url "http://$ip/doktunnel" '.companion_url == $url' "$out/context-add.json" >/dev/null ||
 		fail "context add did not store the companion URL"
-	if jq -e '(.warnings // []) | map(select(test("companion"; "i"))) | length > 0' "$out/context-add.json" >/dev/null; then
-		fail "context add warned about the companion"
+	# Plain http:// is expected on an internal network; any other warning,
+	# such as an unreachable companion, is not.
+	if jq -e '(.warnings // []) | map(select(test("plain http://") | not)) | length > 0' "$out/context-add.json" >/dev/null; then
+		fail "context add warned about something other than plain http://"
 	fi
 	pass "context add stored http://$ip/doktunnel and its /healthz probe answered"
 }
