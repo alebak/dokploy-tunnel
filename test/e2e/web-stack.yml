@@ -1,0 +1,9 @@
+# Target stack of the e2e workflow: two services inside one Dokploy "Docker
+# Compose" service, with no published ports and no domains, so doktunnel is
+# the only way in from the runner. nginx listens on port 80, which doktunnel
+# forwards on local port 8080.
+services:
+  nginx:
+    image: nginx:1.27-alpine
+  whoami:
+    image: traefik/whoami:v1.10.3

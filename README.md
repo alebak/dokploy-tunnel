@@ -474,6 +474,8 @@ The `platform` workflow (`.github/workflows/platform.yml`) checks on GitHub's Li
 
 A disproved assumption shows up as a *Platform finding* warning on the run and in its job summary. These tests live in `internal/platformtest`, need the `platform` build tag, and skip unless `DOKTUNNEL_PLATFORM_TESTS=1` is set on GitHub Actions: they run sudo and rewrite the system hosts file, so never run them on your own machine.
 
+The `e2e` workflow (`.github/workflows/e2e.yml`) installs a real Dokploy on a disposable Linux runner and checks the whole path: the companion built from the branch and deployed as described in [docs/install-companion.md](docs/install-companion.md), then `context add`, `services`, `forward`, `status`, and a Postgres query and an HTTP request through the `.internal` hostnames. See [CONTRIBUTING.md](CONTRIBUTING.md#end-to-end-tests-against-dokploy) for when it runs.
+
 ## Contributing
 
 See [CONTRIBUTING.md](CONTRIBUTING.md). Report vulnerabilities privately as described in [SECURITY.md](SECURITY.md).
