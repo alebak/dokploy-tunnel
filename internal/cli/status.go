@@ -41,10 +41,11 @@ func newStatusCommand() *Command {
 			"another doktunnel version, is left in place and reported as a warning. A killed forward process " +
 			"whose PID was reused by another program is still listed until that program exits. " +
 			"Human output: a table with CONTEXT, HOSTNAME, ADDRESS, TARGET, PID and SINCE, sorted by context, " +
-			"hostname and port, or 'No active forwards.' on stderr. JSON output: " +
+			"hostname and port, where TARGET is `<service>:<service port>` when the local port in ADDRESS differs, " +
+			"or 'No active forwards.' on stderr. JSON output: " +
 			"`{\"forwards\":[...],\"warnings\":[...]}`, both always arrays, where each forward has `pid`, " +
 			"`started_at` (RFC 3339), `context`, `companion_url`, `target` (`type`, `id`, `name`), `hostname`, " +
-			"`ip` and `port`, and each warning is a string.",
+			"`ip`, `port` (the local port) and `service_port` (the container port), and each warning is a string.",
 		// No flags of its own, but declaring them makes usage show that
 		// status takes no arguments.
 		Flags: func(*flag.FlagSet) {},
@@ -77,7 +78,7 @@ func runStatus(env *Env) error {
 	fmt.Fprintln(tw, "CONTEXT\tHOSTNAME\tADDRESS\tTARGET\tPID\tSINCE")
 	for _, f := range out.Forwards {
 		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%d\t%s\n", f.Context, f.Hostname,
-			netip.AddrPortFrom(f.IP, uint16(f.Port)), f.Target.Name, f.PID,
+			netip.AddrPortFrom(f.IP, uint16(f.Port)), targetLabel(f.Target.Name, f.ServicePort, f.Port), f.PID,
 			f.StartedAt.Local().Format(time.DateTime))
 	}
 	return tw.Flush()

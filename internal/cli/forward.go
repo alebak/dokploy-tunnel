@@ -53,6 +53,10 @@ type forwardOptions struct {
 	port     int
 	portSet  bool
 	allPorts bool
+	// localPort is the --local-port value; localPortSet tells
+	// --local-port 0 from no --local-port.
+	localPort    int
+	localPortSet bool
 }
 
 func newForwardCommand() *Command {
@@ -62,6 +66,14 @@ func newForwardCommand() *Command {
 		Summary: "Forward Dokploy services to stable local hostnames and ports",
 		Description: "Forwards each service on its own loopback address, leased from 127.77.0.0/16, and its real port, " +
 			"never on 0.0.0.0, and opens one tunnel through the context's companion for every local connection. " +
+			"A port below 1024, which needs privileges to listen on, is listened on at port + 8000 (80 on 8080, 443 on 8443), " +
+			"or the next number up that the service does not expose itself; the choice is stored in the service's lease and " +
+			"reused, and a stored port the service now exposes itself is picked again with a warning. With --port below 1024 " +
+			"it asks the companion which ports the service exposes; when the companion cannot answer it warns and picks " +
+			"the port without them. --local-port <n> listens on n instead, for a single port, without storing it, and fails " +
+			"with invalid_argument when n is the stored local port of another port of the service, a port the companion " +
+			"reports the service exposes (it is not asked for --port from 1024 up or a database's default port), or the " +
+			"port of a running forward on that address; an n below 1024 needs privileges. Ports from 1024 up keep their number. " +
 			"Services are named as 'doktunnel services' lists them: by name, `<compose>/<service>` for a service " +
 			"inside a compose stack, or ID; a compose stack itself is not forwardable. Without services or --all " +
 			"it asks which to forward, or fails with missing_input when it cannot ask. " +
@@ -73,9 +85,11 @@ func newForwardCommand() *Command {
 			"closes every tunnel, removes its hostnames from the hosts file unless another running forward uses " +
 			"them (elevating again when needed; with --no-input, or when elevation fails, it leaves them and warns " +
 			"to run 'doktunnel hosts clean'), and exits 0. Human output: one `<hostname> (<ip>:<port>) → <service>` line per " +
-			"forward on stdout, connection events on stderr. JSON output, printed once every forward listens: " +
+			"forward on stdout, `→ <service>:<service port>` when the local port differs, connection events on stderr. " +
+			"JSON output, printed once every forward listens: " +
 			"`{\"context\":\"<name>\",\"pid\":<pid>,\"started_at\":\"<RFC 3339>\",\"companion_url\":\"<URL>\",\"forwards\":[...]}`, " +
-			"where each forward has `target` (`type`, `id`, `name`), `hostname`, `ip` and `port`; nothing else is " +
+			"where each forward has `target` (`type`, `id`, `name`), `hostname`, `ip`, `port` (the local port) and " +
+			"`service_port` (the container port); nothing else is " +
 			"printed afterwards, not even connection events.",
 		Args: "[<service>...]",
 		Flags: func(fs *flag.FlagSet) {
@@ -91,6 +105,14 @@ func newForwardCommand() *Command {
 				return nil
 			})
 			fs.BoolVar(&opts.allPorts, "all-ports", false, "forward every port the companion reports, instead of failing when there are several")
+			fs.Func("local-port", "listen on this local `port` instead of the one the rule picks; only with a single port, and not stored", func(v string) error {
+				n, err := strconv.Atoi(v)
+				if err != nil {
+					return errors.New("not a number")
+				}
+				opts.localPort, opts.localPortSet = n, true
+				return nil
+			})
 		},
 		Run: func(env *Env, args []string) error {
 			return runForward(env, args, opts)
@@ -324,37 +346,56 @@ type portLister interface {
 
 // resolvePorts returns the ports to forward for t: --port, else the
 // database's default port, else what the companion reports. It never
-// guesses.
-func resolvePorts(ctx context.Context, companion portLister, t forwardTarget, opts forwardOptions) ([]int, error) {
+// guesses. exposed are every port the service is known to expose: the
+// ports to forward, or all the companion reports.
+//
+// A --port below registry.FirstUnprivilegedPort is listened on at another
+// local port, which must skip the ports the service exposes itself, so
+// resolvePorts asks the companion for them too. That is best effort: when
+// the companion cannot answer, such as one older than its ports endpoint,
+// exposed holds --port alone and unreported is why.
+func resolvePorts(ctx context.Context, companion portLister, t forwardTarget, opts forwardOptions) (ports, exposed []int, unreported, err error) {
 	if opts.portSet {
-		return []int{opts.port}, nil
+		ports = []int{opts.port}
+		if opts.port >= registry.FirstUnprivilegedPort {
+			return ports, ports, nil, nil
+		}
+		reported, err := companion.Ports(ctx, t.ref)
+		if err != nil {
+			return ports, ports, err, nil
+		}
+		exposed = []int{opts.port}
+		for _, p := range reported {
+			exposed = append(exposed, p.Port)
+		}
+		return ports, exposed, nil, nil
 	}
 	if t.ref.ComposeService == "" {
 		if p := dokploy.DefaultPort(t.ref.ServiceType); p != dokploy.UnknownPort {
-			return []int{p}, nil
+			return []int{p}, []int{p}, nil, nil
 		}
 	}
 	reported, err := companion.Ports(ctx, t.ref)
 	if err != nil {
-		return nil, forward.CLIError(err)
+		return nil, nil, nil, forward.CLIError(err)
 	}
-	ports := make([]int, len(reported))
+	ports = make([]int, len(reported))
 	for i, p := range reported {
 		ports[i] = p.Port
 	}
 	switch {
 	case len(ports) == 0:
-		return nil, clierr.Newf(clierr.MissingInput, "missing value for --port: the companion reports no exposed port for %s", t.name).
+		return nil, nil, nil, clierr.Newf(clierr.MissingInput, "missing value for --port: the companion reports no exposed port for %s", t.name).
 			WithHint("pass --port <n> with the port the service listens on")
 	case len(ports) > 1 && !opts.allPorts:
 		list := make([]string, len(ports))
 		for i, p := range ports {
 			list[i] = strconv.Itoa(p)
 		}
-		return nil, clierr.Newf(clierr.MissingInput, "missing value for --port: %s exposes several ports: %s", t.name, strings.Join(list, ", ")).
+		return nil, nil, nil, clierr.Newf(clierr.MissingInput, "missing value for --port: %s exposes several ports: %s", t.name, strings.Join(list, ", ")).
 			WithHint("pass --port <n> to forward one of them, or --all-ports to forward each")
 	}
-	return ports, nil
+	return ports, ports, nil, nil
 }
 
 // plannedForward is one listener to open.
@@ -362,7 +403,28 @@ type plannedForward struct {
 	target   forwardTarget
 	ip       netip.Addr
 	hostname string
-	port     int
+	// port is the service port the tunnel connects to; localPort is the
+	// port the listener is bound to.
+	port      int
+	localPort int
+}
+
+// local is the address the listener is bound to.
+func (p plannedForward) local() netip.AddrPort {
+	return netip.AddrPortFrom(p.ip, uint16(p.localPort))
+}
+
+// targetLabel names the target in output: its name, followed by the
+// service port when the listener is bound to another port.
+func (p plannedForward) targetLabel() string {
+	return targetLabel(p.target.name, p.port, p.localPort)
+}
+
+func targetLabel(name string, servicePort, localPort int) string {
+	if servicePort == localPort {
+		return name
+	}
+	return fmt.Sprintf("%s:%d", name, servicePort)
 }
 
 func validateForwardOptions(args []string, opts forwardOptions) error {
@@ -373,6 +435,10 @@ func validateForwardOptions(args []string, opts forwardOptions) error {
 		return clierr.New(clierr.InvalidArgument, "pass either --port or --all-ports, not both")
 	case opts.portSet && (opts.port < 1 || opts.port > 65535):
 		return clierr.Newf(clierr.InvalidArgument, "invalid --port %d: it must be a number from 1 to 65535", opts.port)
+	case opts.localPortSet && (opts.localPort < 1 || opts.localPort > 65535):
+		return clierr.Newf(clierr.InvalidArgument, "invalid --local-port %d: it must be a number from 1 to 65535", opts.localPort)
+	case opts.localPortSet && opts.allPorts:
+		return clierr.New(clierr.InvalidArgument, "pass either --local-port or --all-ports, not both: --local-port applies to a single port")
 	}
 	return nil
 }
@@ -394,6 +460,10 @@ func runForward(env *Env, args []string, opts forwardOptions) error {
 		return clierr.Newf(clierr.InvalidArgument, "--port applies to a single service, and %d are selected", len(selected)).
 			WithHint("forward the services one at a time to pick a port for each")
 	}
+	if opts.localPortSet && len(selected) > 1 {
+		return clierr.Newf(clierr.InvalidArgument, "--local-port applies to a single port of a single service, and %d services are selected", len(selected)).
+			WithHint("forward the services one at a time to pick a local port for each")
+	}
 	if selected, err = cat.withAppNames(ctx, env, selected); err != nil {
 		return err
 	}
@@ -408,13 +478,20 @@ func runForward(env *Env, args []string, opts forwardOptions) error {
 			WithHint(fmt.Sprintf("run 'doktunnel context set-companion %s <URL>'", cat.context.Name))
 	}
 	ports := make([][]int, len(selected))
+	exposed := make([][]int, len(selected))
+	unreported := make([]error, len(selected))
 	for i, t := range selected {
-		if ports[i], err = resolvePorts(ctx, client, t, opts); err != nil {
+		if ports[i], exposed[i], unreported[i], err = resolvePorts(ctx, client, t, opts); err != nil {
 			return err
 		}
 	}
+	// With --all-ports refused above, a single service resolves to one
+	// port; this only guards that assumption.
+	if opts.localPortSet && len(ports[0]) != 1 {
+		return clierr.Newf(clierr.InvalidArgument, "--local-port applies to a single port, and %s resolves to %d", selected[0].name, len(ports[0]))
+	}
 
-	planned, err := env.leaseTargets(cat, selected, ports)
+	planned, err := env.leaseTargets(cat, selected, ports, exposed, unreported, opts)
 	if err != nil {
 		return err
 	}
@@ -422,8 +499,12 @@ func runForward(env *Env, args []string, opts forwardOptions) error {
 }
 
 // leaseTargets leases an address for every target, records what its
-// hostname is built from, and plans one forward per target and port.
-func (e *Env) leaseTargets(cat *catalog, targets []forwardTarget, ports [][]int) ([]plannedForward, error) {
+// hostname is built from, picks the local port of each of its ports, and
+// plans one forward per target and port. unreported[i], when not nil, is
+// why the companion did not say which ports targets[i] exposes; a port
+// listened on at another local port then gets a warning, since the service
+// may expose that local port itself.
+func (e *Env) leaseTargets(cat *catalog, targets []forwardTarget, ports, exposed [][]int, unreported []error, opts forwardOptions) ([]plannedForward, error) {
 	regPath, err := e.registryPath()
 	if err != nil {
 		return nil, err
@@ -433,6 +514,7 @@ func (e *Env) leaseTargets(cat *catalog, targets []forwardTarget, ports [][]int)
 		return nil, err
 	}
 	ips := make([]netip.Addr, len(targets))
+	mappings := make([][]registry.PortMapping, len(targets))
 	for i, t := range targets {
 		k := registry.Key{Instance: cat.context.URL, OrganizationID: cat.context.OrganizationID, ServiceID: t.id}
 		if ips[i], err = reg.Lease(k); err != nil {
@@ -442,6 +524,26 @@ func (e *Env) leaseTargets(cat *catalog, targets []forwardTarget, ports [][]int)
 		names.Context = cat.context.Name
 		if _, err := reg.SetNames(k, names); err != nil {
 			return nil, leaseError(regPath, err)
+		}
+		var fixed map[int]int
+		if opts.localPortSet {
+			fixed = map[int]int{ports[i][0]: opts.localPort}
+			if err := e.checkLocalPortFree(ips[i], ports[i][0], opts.localPort); err != nil {
+				return nil, err
+			}
+		}
+		if mappings[i], err = reg.MapPorts(k, ports[i], exposed[i], fixed); err != nil {
+			return nil, localPortError(regPath, t, err)
+		}
+		for _, m := range mappings[i] {
+			if m.Replaced != 0 {
+				e.warn(fmt.Sprintf("%s: port %d now listens on %d, not %d, because the service exposes %d itself",
+					t.name, m.ServicePort, m.LocalPort, m.Replaced, m.Replaced))
+			}
+			if unreported[i] != nil && m.LocalPort != m.ServicePort {
+				e.warn(fmt.Sprintf("%s: the companion did not report the ports the service exposes (%s); port %d listens on %d, which the service may also expose itself",
+					t.name, forward.CLIError(unreported[i]).Message, m.ServicePort, m.LocalPort))
+			}
 		}
 	}
 	named, err := e.namedEntries()
@@ -454,11 +556,47 @@ func (e *Env) leaseTargets(cat *catalog, targets []forwardTarget, ports [][]int)
 	}
 	var planned []plannedForward
 	for i, t := range targets {
-		for _, port := range ports[i] {
-			planned = append(planned, plannedForward{target: t, ip: ips[i], hostname: byIP[ips[i]], port: port})
+		for _, m := range mappings[i] {
+			planned = append(planned, plannedForward{target: t, ip: ips[i], hostname: byIP[ips[i]], port: m.ServicePort, localPort: m.LocalPort})
 		}
 	}
 	return planned, nil
+}
+
+// checkLocalPortFree fails when a running forward already listens on ip
+// and the --local-port value local, which another port of the same
+// service would then collide with.
+func (e *Env) checkLocalPortFree(ip netip.Addr, port, local int) error {
+	running, err := e.activeForwards()
+	if err != nil {
+		return err
+	}
+	for _, f := range running.Forwards {
+		if f.IP == ip && f.Port == local {
+			return clierr.Newf(clierr.InvalidArgument, "invalid --local-port %d for port %d: %s is already forwarded to port %d of %s by doktunnel process %d",
+				local, port, netip.AddrPortFrom(ip, uint16(local)), f.ServicePort, f.Target.Name, f.PID).
+				WithHint("pick another --local-port, or stop that forward first")
+		}
+	}
+	return nil
+}
+
+// localPortError explains a failure to pick the local ports of t.
+func localPortError(path string, t forwardTarget, err error) error {
+	var ce *registry.PortCollisionError
+	switch {
+	case errors.As(err, &ce):
+		why := fmt.Sprintf("its port %d is already mapped to local port %d", ce.OtherPort, ce.LocalPort)
+		if ce.OtherPort == ce.LocalPort {
+			why = fmt.Sprintf("it exposes port %d itself", ce.OtherPort)
+		}
+		return clierr.Newf(clierr.InvalidArgument, "invalid --local-port %d for port %d of %s: %s", ce.LocalPort, ce.ServicePort, t.name, why).
+			WithHint("pick another --local-port")
+	case errors.Is(err, registry.ErrNoLocalPort):
+		return clierr.Newf(clierr.InvalidArgument, "%s: %v", t.name, err).
+			WithHint("pass --local-port <n> with a free local port")
+	}
+	return leaseError(path, err)
 }
 
 func leaseError(path string, err error) error {
@@ -490,7 +628,7 @@ func (e *Env) serveForwards(contextName, companionURL string, client *forward.Cl
 	for _, p := range planned {
 		state.Forwards = append(state.Forwards, runstate.Forward{
 			Target:   runstate.Target{Type: p.target.typ, ID: p.target.id, Name: p.target.name},
-			Hostname: p.hostname, IP: p.ip, Port: p.port,
+			Hostname: p.hostname, IP: p.ip, Port: p.localPort, ServicePort: p.port,
 		})
 	}
 	// The state file comes first: the sync writes the hostnames of running
@@ -541,7 +679,7 @@ func (e *Env) serveForwards(contextName, companionURL string, client *forward.Cl
 		}
 	}
 	for _, p := range planned {
-		addr := netip.AddrPortFrom(p.ip, uint16(p.port)).String()
+		addr := p.local().String()
 		f, err := client.Listen(forward.Config{
 			Addr:    addr,
 			Target:  p.target.ref.Target(p.port),
@@ -550,8 +688,8 @@ func (e *Env) serveForwards(contextName, companionURL string, client *forward.Cl
 		})
 		if err != nil {
 			closeAll()
-			return clierr.Newf(clierr.Internal, "forwarding %s: %v", p.target.name, err).
-				WithHint(fmt.Sprintf("another process may already listen on %s; run 'doktunnel status' to see running forwards", addr))
+			return clierr.Newf(clierr.Internal, "forwarding port %d of %s on %s: %v", p.port, p.target.name, addr, err).
+				WithHint(bindHint(addr, p.localPort, err))
 		}
 		fwds = append(fwds, f)
 	}
@@ -582,6 +720,24 @@ func (e *Env) serveForwards(contextName, companionURL string, client *forward.Cl
 		e.warn("some tunnels did not close in time")
 	}
 	return nil
+}
+
+// bindHint suggests why listening on addr, whose port is localPort, failed
+// with err. Only --local-port can pick a port below
+// registry.FirstUnprivilegedPort, which most systems keep for privileged
+// processes; Windows reports that refusal with an error that is not
+// os.ErrPermission, so the hint names both causes when it cannot tell.
+func bindHint(addr string, localPort int, err error) string {
+	busy := fmt.Sprintf("another process may already listen on %s; run 'doktunnel status' to see running forwards", addr)
+	if localPort >= registry.FirstUnprivilegedPort {
+		return busy
+	}
+	privileged := fmt.Sprintf("listening on a port below %d needs privileges; pass --local-port with a port from %d up",
+		registry.FirstUnprivilegedPort, registry.FirstUnprivilegedPort)
+	if errors.Is(err, os.ErrPermission) {
+		return privileged
+	}
+	return privileged + "; otherwise " + busy
 }
 
 // removeOwnHosts removes this process's hostnames from the hosts file as it
@@ -645,7 +801,7 @@ func writeForwards(e *Env, out forwardJSON, planned []plannedForward) error {
 	}
 	var b strings.Builder
 	for _, p := range planned {
-		fmt.Fprintf(&b, "%s (%s) → %s\n", p.hostname, netip.AddrPortFrom(p.ip, uint16(p.port)), p.target.name)
+		fmt.Fprintf(&b, "%s (%s) → %s\n", p.hostname, p.local(), p.targetLabel())
 	}
 	if _, err := fmt.Fprint(e.Stdout, b.String()); err != nil {
 		return err

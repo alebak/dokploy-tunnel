@@ -65,8 +65,13 @@ type Forward struct {
 	Hostname string `json:"hostname"`
 	// IP is the leased loopback address the listener is bound to.
 	IP netip.Addr `json:"ip"`
-	// Port is both the local port and the container port.
+	// Port is the local port the listener is bound to.
 	Port int `json:"port"`
+	// ServicePort is the container port the listener forwards to. It
+	// equals Port except for a container port below 1024, which is
+	// listened on at a higher local port. Files written before it existed
+	// read it as Port.
+	ServicePort int `json:"service_port"`
 }
 
 // Target identifies a forwarded service.
@@ -144,6 +149,11 @@ func Read(path string) (Process, error) {
 	}
 	if p.Version != Version {
 		return Process{}, fmt.Errorf("%w: %s has version %d, want %d", ErrUnsupportedVersion, path, p.Version, Version)
+	}
+	for i, f := range p.Forwards {
+		if f.ServicePort == 0 {
+			p.Forwards[i].ServicePort = f.Port
+		}
 	}
 	return p, nil
 }

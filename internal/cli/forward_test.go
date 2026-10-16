@@ -162,6 +162,9 @@ type forwardHarness struct {
 	order   []string
 	// busy are requested addresses whose listen fails, as if taken.
 	busy map[string]bool
+	// denied are requested addresses whose listen fails with a permission
+	// error, as a port below 1024 does for an unprivileged process.
+	denied map[string]bool
 	// writes are the hosts file contents written without elevation.
 	writes []string
 }
@@ -194,6 +197,9 @@ func (h *forwardHarness) keepRunning() {
 func (h *forwardHarness) listen(network, addr string) (net.Listener, error) {
 	if h.busy[addr] {
 		return nil, fmt.Errorf("listen %s %s: address already in use", network, addr)
+	}
+	if h.denied[addr] {
+		return nil, fmt.Errorf("listen %s %s: %w", network, addr, os.ErrPermission)
 	}
 	ln, err := net.Listen(network, "127.0.0.1:0")
 	if err != nil {
@@ -273,17 +279,24 @@ type forwardOut struct {
 			ID   string `json:"id"`
 			Name string `json:"name"`
 		} `json:"target"`
-		Hostname string `json:"hostname"`
-		IP       string `json:"ip"`
-		Port     int    `json:"port"`
+		Hostname    string `json:"hostname"`
+		IP          string `json:"ip"`
+		Port        int    `json:"port"`
+		ServicePort int    `json:"service_port"`
 	} `json:"forwards"`
 }
 
-// summary renders the forwards as "<id>@<ip>:<port>=<hostname>" strings.
+// summary renders the forwards as "<id>@<ip>:<port>=<hostname>" strings,
+// or "<id>@<ip>:<port>→<service port>=<hostname>" when the two ports
+// differ.
 func (o forwardOut) summary() []string {
 	var s []string
 	for _, f := range o.Forwards {
-		s = append(s, fmt.Sprintf("%s@%s:%d=%s", f.Target.ID, f.IP, f.Port, f.Hostname))
+		port := fmt.Sprint(f.Port)
+		if f.ServicePort != f.Port {
+			port += fmt.Sprintf("→%d", f.ServicePort)
+		}
+		s = append(s, fmt.Sprintf("%s@%s:%s=%s", f.Target.ID, f.IP, port, f.Hostname))
 	}
 	return s
 }
@@ -329,7 +342,7 @@ func TestForward_SelectsTargetsAndResolvesPorts(t *testing.T) {
 		{
 			name:       "--all-ports forwards every exposed port",
 			args:       []string{"myapp/pgadmin", "--all-ports"},
-			want:       []string{"cmp_myapp/pgadmin@127.77.0.1:80=pgadmin.shop-myapp-x1y2z3.internal", "cmp_myapp/pgadmin@127.77.0.1:443=pgadmin.shop-myapp-x1y2z3.internal"},
+			want:       []string{"cmp_myapp/pgadmin@127.77.0.1:8080→80=pgadmin.shop-myapp-x1y2z3.internal", "cmp_myapp/pgadmin@127.77.0.1:8443→443=pgadmin.shop-myapp-x1y2z3.internal"},
 			portsCalls: []string{"cmp_myapp/pgadmin"},
 		},
 		{

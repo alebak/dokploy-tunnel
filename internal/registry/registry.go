@@ -4,7 +4,8 @@
 // A lease binds a Key (Dokploy instance, organization and service IDs) to one
 // address from a dedicated loopback range. Each service then listens on its
 // real port on its own address, so two services that both use port 5432 never
-// collide. Leases persist in a JSON file shared by every doktunnel process and
+// collide; a port below 1024 is listened on at a higher local port that
+// MapPorts picks and stores in the lease. Leases persist in a JSON file shared by every doktunnel process and
 // are never handed to a different key, not even after Forget.
 package registry
 
@@ -38,6 +39,9 @@ type Lease struct {
 	// Names are what the lease's hostname is built from, last recorded
 	// with SetNames; they are zero until the lease is named.
 	Names hostname.Names
+	// LocalPorts maps the lease's service ports below 1024 to the local
+	// ports they are listened on, as MapPorts stored them.
+	LocalPorts map[int]int
 }
 
 // ExhaustedError is returned when every address in the range is leased or

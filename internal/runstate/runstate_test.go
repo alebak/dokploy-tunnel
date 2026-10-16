@@ -19,10 +19,11 @@ func sampleProcess(pid int) Process {
 		Context:      "prod",
 		CompanionURL: "https://panel.example.com/doktunnel",
 		Forwards: []Forward{{
-			Target:   Target{Type: "compose_service", ID: "cmp_myapp/postgres", Name: "myapp/postgres"},
-			Hostname: "postgres.myapp.shop.acme.prod.internal",
-			IP:       netip.MustParseAddr("127.77.0.1"),
-			Port:     5432,
+			Target:      Target{Type: "compose_service", ID: "cmp_myapp/postgres", Name: "myapp/postgres"},
+			Hostname:    "postgres.myapp.shop.acme.prod.internal",
+			IP:          netip.MustParseAddr("127.77.0.1"),
+			Port:        5432,
+			ServicePort: 5432,
 		}},
 	}
 }
@@ -70,9 +71,48 @@ func TestWrite_Format(t *testing.T) {
 	want := `{"version":1,"pid":7,"started_at":"2026-10-06T12:00:00Z","context":"prod",` +
 		`"companion_url":"https://panel.example.com/doktunnel","forwards":[{"target":{"type":"compose_service",` +
 		`"id":"cmp_myapp/postgres","name":"myapp/postgres"},"hostname":"postgres.myapp.shop.acme.prod.internal",` +
-		`"ip":"127.77.0.1","port":5432}]}` + "\n"
+		`"ip":"127.77.0.1","port":5432,"service_port":5432}]}` + "\n"
 	if string(b) != want {
 		t.Errorf("file =\n%s\nwant\n%s", b, want)
+	}
+}
+
+// A file written before service_port existed lists the forward's port as
+// both its local and its service port, as it was.
+func TestRead_FileWithoutServicePort(t *testing.T) {
+	dir := Dir(t.TempDir())
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	old := `{"version":1,"pid":7,"started_at":"2026-10-06T12:00:00Z","context":"prod","companion_url":"https://panel.example.com/doktunnel",` +
+		`"forwards":[{"target":{"type":"postgres","id":"pg_main","name":"main-db"},"hostname":"main.internal","ip":"127.77.0.1","port":5432}]}`
+	if err := os.WriteFile(Path(dir, 7), []byte(old), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	p, err := Read(Path(dir, 7))
+	if err != nil {
+		t.Fatalf("Read() error = %v", err)
+	}
+	if len(p.Forwards) != 1 || p.Forwards[0].Port != 5432 || p.Forwards[0].ServicePort != 5432 {
+		t.Errorf("forwards = %+v, want port and service port 5432", p.Forwards)
+	}
+}
+
+// A remapped port records its local and its service port apart.
+func TestWriteRead_RemappedPort(t *testing.T) {
+	dir := Dir(t.TempDir())
+	p := sampleProcess(9)
+	p.Forwards[0].Port, p.Forwards[0].ServicePort = 8080, 80
+	path, err := Write(dir, p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := Read(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if f := got.Forwards[0]; f.Port != 8080 || f.ServicePort != 80 {
+		t.Errorf("forward = %+v, want port 8080 and service port 80", f)
 	}
 }
 
