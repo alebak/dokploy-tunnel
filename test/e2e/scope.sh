@@ -12,7 +12,8 @@ set -euo pipefail
 : "${BASE_SHA:?}" "${HEAD_SHA:?}" "${HEAD_REF:?}"
 
 # Paths whose changes can break what the e2e job proves: the companion and
-# what it runs, the CLI's forward path, and the deployment it installs.
+# what it runs, the CLI's forward path and the packages both depend on,
+# and the deployment it installs.
 patterns=(
 	'internal/companion/*'
 	'internal/repeater/*'
@@ -21,6 +22,14 @@ patterns=(
 	'internal/forward/*'
 	'internal/cli/forward*.go'
 	'internal/tunnel/*'
+	'internal/dokploy/*'
+	'internal/hosts/*'
+	'internal/hostname/*'
+	'internal/registry/*'
+	'internal/runstate/*'
+	'internal/elevate/*'
+	'go.mod'
+	'go.sum'
 	'cmd/doktunnel-companion/*'
 	'cmd/doktunnel-socket-proxy/*'
 	'deploy/dokploy/*'
