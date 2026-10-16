@@ -63,8 +63,10 @@ create_api_key() {
 	[[ -n $org_id ]] || fail "the admin has no organization"
 	state_set organization-id "$org_id"
 
+	# The panel's form sends rateLimitEnabled: false. Left out, better-auth's
+	# default applies (10 requests a day), and Dokploy then answers 401.
 	key_json="$(trpc POST user.createApiKey "$(jq -cn --arg org "$org_id" \
-		'{name: "doktunnel-e2e", metadata: {organizationId: $org}}')")"
+		'{name: "doktunnel-e2e", rateLimitEnabled: false, metadata: {organizationId: $org}}')")"
 	key="$(jq -r '.key // empty' <<<"$key_json")"
 	[[ -n $key ]] || fail "user.createApiKey returned no key"
 	echo "::add-mask::$key"
