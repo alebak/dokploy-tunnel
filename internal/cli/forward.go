@@ -68,9 +68,12 @@ func newForwardCommand() *Command {
 			"never on 0.0.0.0, and opens one tunnel through the context's companion for every local connection. " +
 			"A port below 1024, which needs privileges to listen on, is listened on at port + 8000 (80 on 8080, 443 on 8443), " +
 			"or the next number up that the service does not expose itself; the choice is stored in the service's lease and " +
-			"reused, and a stored port the service now exposes itself is picked again with a warning. --local-port <n> " +
-			"listens on n instead, for a single port, without storing it, and fails with invalid_argument when another " +
-			"port of the service, or a running forward on that address, uses n. Ports from 1024 up keep their number. " +
+			"reused, and a stored port the service now exposes itself is picked again with a warning. With --port below 1024 " +
+			"it asks the companion which ports the service exposes; when the companion cannot answer it warns and picks " +
+			"the port without them. --local-port <n> listens on n instead, for a single port, without storing it, and fails " +
+			"with invalid_argument when n is the stored local port of another port of the service, a port the companion " +
+			"reports the service exposes (it is not asked for --port from 1024 up or a database's default port), or the " +
+			"port of a running forward on that address; an n below 1024 needs privileges. Ports from 1024 up keep their number. " +
 			"Services are named as 'doktunnel services' lists them: by name, `<compose>/<service>` for a service " +
 			"inside a compose stack, or ID; a compose stack itself is not forwardable. Without services or --all " +
 			"it asks which to forward, or fails with missing_input when it cannot ask. " +
@@ -345,18 +348,36 @@ type portLister interface {
 // database's default port, else what the companion reports. It never
 // guesses. exposed are every port the service is known to expose: the
 // ports to forward, or all the companion reports.
-func resolvePorts(ctx context.Context, companion portLister, t forwardTarget, opts forwardOptions) (ports, exposed []int, err error) {
+//
+// A --port below registry.FirstUnprivilegedPort is listened on at another
+// local port, which must skip the ports the service exposes itself, so
+// resolvePorts asks the companion for them too. That is best effort: when
+// the companion cannot answer, such as one older than its ports endpoint,
+// exposed holds --port alone and unreported is why.
+func resolvePorts(ctx context.Context, companion portLister, t forwardTarget, opts forwardOptions) (ports, exposed []int, unreported, err error) {
 	if opts.portSet {
-		return []int{opts.port}, []int{opts.port}, nil
+		ports = []int{opts.port}
+		if opts.port >= registry.FirstUnprivilegedPort {
+			return ports, ports, nil, nil
+		}
+		reported, err := companion.Ports(ctx, t.ref)
+		if err != nil {
+			return ports, ports, err, nil
+		}
+		exposed = []int{opts.port}
+		for _, p := range reported {
+			exposed = append(exposed, p.Port)
+		}
+		return ports, exposed, nil, nil
 	}
 	if t.ref.ComposeService == "" {
 		if p := dokploy.DefaultPort(t.ref.ServiceType); p != dokploy.UnknownPort {
-			return []int{p}, []int{p}, nil
+			return []int{p}, []int{p}, nil, nil
 		}
 	}
 	reported, err := companion.Ports(ctx, t.ref)
 	if err != nil {
-		return nil, nil, forward.CLIError(err)
+		return nil, nil, nil, forward.CLIError(err)
 	}
 	ports = make([]int, len(reported))
 	for i, p := range reported {
@@ -364,17 +385,17 @@ func resolvePorts(ctx context.Context, companion portLister, t forwardTarget, op
 	}
 	switch {
 	case len(ports) == 0:
-		return nil, nil, clierr.Newf(clierr.MissingInput, "missing value for --port: the companion reports no exposed port for %s", t.name).
+		return nil, nil, nil, clierr.Newf(clierr.MissingInput, "missing value for --port: the companion reports no exposed port for %s", t.name).
 			WithHint("pass --port <n> with the port the service listens on")
 	case len(ports) > 1 && !opts.allPorts:
 		list := make([]string, len(ports))
 		for i, p := range ports {
 			list[i] = strconv.Itoa(p)
 		}
-		return nil, nil, clierr.Newf(clierr.MissingInput, "missing value for --port: %s exposes several ports: %s", t.name, strings.Join(list, ", ")).
+		return nil, nil, nil, clierr.Newf(clierr.MissingInput, "missing value for --port: %s exposes several ports: %s", t.name, strings.Join(list, ", ")).
 			WithHint("pass --port <n> to forward one of them, or --all-ports to forward each")
 	}
-	return ports, ports, nil
+	return ports, ports, nil, nil
 }
 
 // plannedForward is one listener to open.
@@ -458,8 +479,9 @@ func runForward(env *Env, args []string, opts forwardOptions) error {
 	}
 	ports := make([][]int, len(selected))
 	exposed := make([][]int, len(selected))
+	unreported := make([]error, len(selected))
 	for i, t := range selected {
-		if ports[i], exposed[i], err = resolvePorts(ctx, client, t, opts); err != nil {
+		if ports[i], exposed[i], unreported[i], err = resolvePorts(ctx, client, t, opts); err != nil {
 			return err
 		}
 	}
@@ -469,7 +491,7 @@ func runForward(env *Env, args []string, opts forwardOptions) error {
 		return clierr.Newf(clierr.InvalidArgument, "--local-port applies to a single port, and %s resolves to %d", selected[0].name, len(ports[0]))
 	}
 
-	planned, err := env.leaseTargets(cat, selected, ports, exposed, opts)
+	planned, err := env.leaseTargets(cat, selected, ports, exposed, unreported, opts)
 	if err != nil {
 		return err
 	}
@@ -478,8 +500,11 @@ func runForward(env *Env, args []string, opts forwardOptions) error {
 
 // leaseTargets leases an address for every target, records what its
 // hostname is built from, picks the local port of each of its ports, and
-// plans one forward per target and port.
-func (e *Env) leaseTargets(cat *catalog, targets []forwardTarget, ports, exposed [][]int, opts forwardOptions) ([]plannedForward, error) {
+// plans one forward per target and port. unreported[i], when not nil, is
+// why the companion did not say which ports targets[i] exposes; a port
+// listened on at another local port then gets a warning, since the service
+// may expose that local port itself.
+func (e *Env) leaseTargets(cat *catalog, targets []forwardTarget, ports, exposed [][]int, unreported []error, opts forwardOptions) ([]plannedForward, error) {
 	regPath, err := e.registryPath()
 	if err != nil {
 		return nil, err
@@ -514,6 +539,10 @@ func (e *Env) leaseTargets(cat *catalog, targets []forwardTarget, ports, exposed
 			if m.Replaced != 0 {
 				e.warn(fmt.Sprintf("%s: port %d now listens on %d, not %d, because the service exposes %d itself",
 					t.name, m.ServicePort, m.LocalPort, m.Replaced, m.Replaced))
+			}
+			if unreported[i] != nil && m.LocalPort != m.ServicePort {
+				e.warn(fmt.Sprintf("%s: the companion did not report the ports the service exposes (%s); port %d listens on %d, which the service may also expose itself",
+					t.name, forward.CLIError(unreported[i]).Message, m.ServicePort, m.LocalPort))
 			}
 		}
 	}
@@ -557,7 +586,7 @@ func localPortError(path string, t forwardTarget, err error) error {
 	var ce *registry.PortCollisionError
 	switch {
 	case errors.As(err, &ce):
-		why := fmt.Sprintf("its port %d is listened on at %d", ce.OtherPort, ce.LocalPort)
+		why := fmt.Sprintf("its port %d is already mapped to local port %d", ce.OtherPort, ce.LocalPort)
 		if ce.OtherPort == ce.LocalPort {
 			why = fmt.Sprintf("it exposes port %d itself", ce.OtherPort)
 		}
@@ -660,7 +689,7 @@ func (e *Env) serveForwards(contextName, companionURL string, client *forward.Cl
 		if err != nil {
 			closeAll()
 			return clierr.Newf(clierr.Internal, "forwarding port %d of %s on %s: %v", p.port, p.target.name, addr, err).
-				WithHint(fmt.Sprintf("another process may already listen on %s; run 'doktunnel status' to see running forwards", addr))
+				WithHint(bindHint(addr, p.localPort, err))
 		}
 		fwds = append(fwds, f)
 	}
@@ -691,6 +720,24 @@ func (e *Env) serveForwards(contextName, companionURL string, client *forward.Cl
 		e.warn("some tunnels did not close in time")
 	}
 	return nil
+}
+
+// bindHint suggests why listening on addr, whose port is localPort, failed
+// with err. Only --local-port can pick a port below
+// registry.FirstUnprivilegedPort, which most systems keep for privileged
+// processes; Windows reports that refusal with an error that is not
+// os.ErrPermission, so the hint names both causes when it cannot tell.
+func bindHint(addr string, localPort int, err error) string {
+	busy := fmt.Sprintf("another process may already listen on %s; run 'doktunnel status' to see running forwards", addr)
+	if localPort >= registry.FirstUnprivilegedPort {
+		return busy
+	}
+	privileged := fmt.Sprintf("listening on a port below %d needs privileges; pass --local-port with a port from %d up",
+		registry.FirstUnprivilegedPort, registry.FirstUnprivilegedPort)
+	if errors.Is(err, os.ErrPermission) {
+		return privileged
+	}
+	return privileged + "; otherwise " + busy
 }
 
 // removeOwnHosts removes this process's hostnames from the hosts file as it

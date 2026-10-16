@@ -162,6 +162,9 @@ type forwardHarness struct {
 	order   []string
 	// busy are requested addresses whose listen fails, as if taken.
 	busy map[string]bool
+	// denied are requested addresses whose listen fails with a permission
+	// error, as a port below 1024 does for an unprivileged process.
+	denied map[string]bool
 	// writes are the hosts file contents written without elevation.
 	writes []string
 }
@@ -194,6 +197,9 @@ func (h *forwardHarness) keepRunning() {
 func (h *forwardHarness) listen(network, addr string) (net.Listener, error) {
 	if h.busy[addr] {
 		return nil, fmt.Errorf("listen %s %s: address already in use", network, addr)
+	}
+	if h.denied[addr] {
+		return nil, fmt.Errorf("listen %s %s: %w", network, addr, os.ErrPermission)
 	}
 	ln, err := net.Listen(network, "127.0.0.1:0")
 	if err != nil {

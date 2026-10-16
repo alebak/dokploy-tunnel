@@ -166,9 +166,16 @@ func TestMapPorts_FixedLocalPort(t *testing.T) {
 		fixed         map[int]int
 		wantLocal     int
 		wantOtherPort int
+		wantMsg       string
 	}{
-		{name: "a port the service exposes", ports: []int{80}, exposed: []int{80, 3000}, fixed: map[int]int{80: 3000}, wantLocal: 3000, wantOtherPort: 3000},
-		{name: "the stored local port of another port", ports: []int{80}, fixed: map[int]int{80: 8443}, wantLocal: 8443, wantOtherPort: 443},
+		{
+			name: "a port the service exposes", ports: []int{80}, exposed: []int{80, 3000}, fixed: map[int]int{80: 3000}, wantLocal: 3000, wantOtherPort: 3000,
+			wantMsg: "local port 3000 for port 80 collides with port 3000, which the service exposes itself",
+		},
+		{
+			name: "the stored local port of another port", ports: []int{80}, fixed: map[int]int{80: 8443}, wantLocal: 8443, wantOtherPort: 443,
+			wantMsg: "local port 8443 for port 80 collides with port 443, which is already mapped to 8443",
+		},
 	}
 	for _, tt := range collisions {
 		t.Run(tt.name, func(t *testing.T) {
@@ -179,6 +186,9 @@ func TestMapPorts_FixedLocalPort(t *testing.T) {
 			}
 			if ce.ServicePort != 80 || ce.LocalPort != tt.wantLocal || ce.OtherPort != tt.wantOtherPort {
 				t.Errorf("collision = %+v, want port 80 on %d colliding with port %d", ce, tt.wantLocal, tt.wantOtherPort)
+			}
+			if err.Error() != tt.wantMsg {
+				t.Errorf("err = %q, want %q", err, tt.wantMsg)
 			}
 		})
 	}

@@ -3,6 +3,7 @@ package cli
 import (
 	"io"
 	"net"
+	"net/http"
 	"net/netip"
 	"os"
 	"slices"
@@ -177,7 +178,16 @@ func TestForward_LocalPortErrors(t *testing.T) {
 				}
 			},
 			wantCode:  clierr.InvalidArgument,
-			wantInMsg: []string{"--local-port 8443", "port 80", "port 443"},
+			wantInMsg: []string{"--local-port 8443", "port 80", "its port 443 is already mapped to local port 8443"},
+		},
+		{
+			name: "a port the companion reports the service exposes",
+			args: []string{"myapp/pgadmin", "--port", "80", "--local-port", "8080"},
+			setup: func(h *forwardHarness) {
+				h.companion.ports["cmp_myapp/pgadmin"] = []int{80, 8080}
+			},
+			wantCode:  clierr.InvalidArgument,
+			wantInMsg: []string{"--local-port 8080", "port 80", "it exposes port 8080 itself"},
 		},
 		{
 			name: "a port a running forward listens on",
@@ -313,5 +323,123 @@ func TestForward_RemappedPortTunnelsToTheServicePort(t *testing.T) {
 	case <-exited:
 	case <-time.After(forwardWait):
 		t.Fatal("forward did not exit")
+	}
+}
+
+// A --port below 1024 asks the companion which ports the service exposes,
+// so its local port skips them; a port from 1024 up never asks.
+func TestForward_LowPortAsksTheCompanionForExposedPorts(t *testing.T) {
+	tests := []struct {
+		name       string
+		ports      []int
+		portsErr   *rejection
+		args       []string
+		want       []string
+		portsCalls []string
+	}{
+		{
+			name:       "a service exposing 80 and 8080 maps --port 80 to 8081",
+			ports:      []int{80, 8080},
+			args:       []string{"myapp/pgadmin", "--port", "80"},
+			want:       []string{"cmp_myapp/pgadmin@127.77.0.1:8081→80=" + pgadminHost},
+			portsCalls: []string{"cmp_myapp/pgadmin"},
+		},
+		{
+			name:       "a companion without the ports endpoint falls back to the rule",
+			ports:      []int{80, 8080},
+			portsErr:   &rejection{http.StatusNotFound, "404 page not found\n"},
+			args:       []string{"myapp/pgadmin", "--port", "80"},
+			want:       []string{"cmp_myapp/pgadmin@127.77.0.1:8080→80=" + pgadminHost},
+			portsCalls: []string{"cmp_myapp/pgadmin"},
+		},
+		{
+			name:       "a refused ports request falls back to the rule",
+			portsErr:   &rejection{http.StatusForbidden, `{"code":"permission_denied","message":"no access"}`},
+			args:       []string{"myapp/pgadmin", "--port", "80"},
+			want:       []string{"cmp_myapp/pgadmin@127.77.0.1:8080→80=" + pgadminHost},
+			portsCalls: []string{"cmp_myapp/pgadmin"},
+		},
+		{
+			name:  "--port from 1024 up does not ask",
+			ports: []int{80, 8080},
+			args:  []string{"myapp/pgadmin", "--port", "8080"},
+			want:  []string{"cmp_myapp/pgadmin@127.77.0.1:8080=" + pgadminHost},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			h := newForwardHarness(t)
+			if tt.ports != nil {
+				h.companion.ports["cmp_myapp/pgadmin"] = tt.ports
+			}
+			h.companion.portsErr = tt.portsErr
+			r := h.forward("", false, append(tt.args, "--json")...)
+			if r.exit != 0 {
+				t.Fatalf("exit = %d (stdout %q, stderr %q)", r.exit, r.stdout, r.stderr)
+			}
+			if r.stderr != "" {
+				t.Errorf("stderr = %q, want nothing in JSON mode", r.stderr)
+			}
+			if got := decodeJSON[forwardOut](t, r.stdout).summary(); !slices.Equal(got, tt.want) {
+				t.Errorf("forwards = %q, want %q", got, tt.want)
+			}
+			if got := h.companion.portsCalls; !slices.Equal(got, tt.portsCalls) {
+				t.Errorf("ports requests = %q, want %q", got, tt.portsCalls)
+			}
+		})
+	}
+}
+
+func TestForward_LowPortWarnsWhenTheCompanionDoesNotReportPorts(t *testing.T) {
+	h := newForwardHarness(t)
+	h.companion.portsErr = &rejection{http.StatusNotFound, "404 page not found\n"}
+	r := h.forward("", false, "myapp/pgadmin", "--port", "80")
+	if r.exit != 0 {
+		t.Fatalf("exit = %d (stderr %q)", r.exit, r.stderr)
+	}
+	if want := pgadminHost + " (127.77.0.1:8080) → myapp/pgadmin:80\n"; r.stdout != want {
+		t.Errorf("stdout = %q, want %q", r.stdout, want)
+	}
+	const warning = "warning: myapp/pgadmin: the companion did not report the ports the service exposes"
+	if strings.Count(r.stderr, "warning:") != 1 || !strings.Contains(r.stderr, warning) || !strings.Contains(r.stderr, "port 80 listens on 8080") {
+		t.Errorf("stderr = %q, want one warning starting %q and naming port 80 on 8080", r.stderr, warning)
+	}
+}
+
+func TestForward_LowLocalPortBindFailureHints(t *testing.T) {
+	tests := []struct {
+		name         string
+		denied, busy bool
+		wantInHint   []string
+		notInHint    string
+	}{
+		{name: "permission denied names privileges only", denied: true, wantInHint: []string{"below 1024", "--local-port"}, notInHint: "another process"},
+		// Windows refuses a low port with an error that is not
+		// os.ErrPermission, so an unknown failure names both causes.
+		{name: "another failure names both causes", busy: true, wantInHint: []string{"below 1024", "--local-port", "another process", "doktunnel status"}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			h := newForwardHarness(t)
+			const addr = "127.77.0.1:80"
+			h.denied = map[string]bool{addr: tt.denied}
+			h.busy = map[string]bool{addr: tt.busy}
+			r := h.forward("", false, "main-db", "--local-port", "80", "--json")
+			if want := clierr.Internal.ExitCode(); r.exit != want {
+				t.Fatalf("exit = %d, want %d (stdout %q)", r.exit, want, r.stdout)
+			}
+			e := decodeError(t, r.stdout)
+			if !strings.Contains(e.Message, "forwarding port 5432 of main-db on "+addr) {
+				t.Errorf("message = %q, want the bind failure", e.Message)
+			}
+			for _, s := range tt.wantInHint {
+				if !strings.Contains(e.Hint, s) {
+					t.Errorf("hint = %q, want it to mention %q", e.Hint, s)
+				}
+			}
+			if tt.notInHint != "" && strings.Contains(e.Hint, tt.notInHint) {
+				t.Errorf("hint = %q, want no %q", e.Hint, tt.notInHint)
+			}
+		})
 	}
 }

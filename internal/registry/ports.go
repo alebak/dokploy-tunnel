@@ -55,7 +55,7 @@ func (e *PortCollisionError) Error() string {
 	if e.OtherPort == e.LocalPort {
 		return fmt.Sprintf("local port %d for port %d collides with port %d, which the service exposes itself", e.LocalPort, e.ServicePort, e.OtherPort)
 	}
-	return fmt.Sprintf("local port %d for port %d collides with port %d, which is listened on at %d", e.LocalPort, e.ServicePort, e.OtherPort, e.LocalPort)
+	return fmt.Sprintf("local port %d for port %d collides with port %d, which is already mapped to %d", e.LocalPort, e.ServicePort, e.OtherPort, e.LocalPort)
 }
 
 // MapPorts returns the local port of every service port in ports, in that
