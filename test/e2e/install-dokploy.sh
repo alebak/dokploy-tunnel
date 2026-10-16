@@ -31,7 +31,9 @@ free_disk() {
 install_dokploy() {
 	log "installing Dokploy $DOKPLOY_VERSION"
 	curl -fsSL https://dokploy.com/install.sh -o "$E2E_DIR/install.sh"
-	# ADVERTISE_ADDR skips install.sh's lookup of the public IP.
+	# ADVERTISE_ADDR skips install.sh's lookup of the public IP. The log is
+	# written as this user, on purpose.
+	# shellcheck disable=SC2024
 	sudo env DOKPLOY_VERSION="$DOKPLOY_VERSION" ADVERTISE_ADDR=127.0.0.1 \
 		bash "$E2E_DIR/install.sh" >"$E2E_DIR/install.log" 2>&1 ||
 		{ tail -n 50 "$E2E_DIR/install.log" >&2; fail "Dokploy's install.sh failed"; }

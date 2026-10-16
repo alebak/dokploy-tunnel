@@ -45,6 +45,29 @@ go vet -tags platform ./internal/platformtest/
 go vet -tags integration ./...
 ```
 
+### End-to-end tests against Dokploy
+
+The `e2e` workflow (`.github/workflows/e2e.yml`, job `dokploy e2e`) installs a real Dokploy on a disposable GitHub runner and runs doktunnel against it, with the companion image and the CLI built from the branch. It covers:
+
+- Dokploy's official `install.sh` at a pinned version, the first admin, an API key, a project, a Postgres database and a compose stack, all created through Dokploy's API.
+- The companion deployed from `deploy/dokploy/docker-compose.yml` as a Dokploy compose service, in the [internal-network variant](docs/install-companion.md#other-addresses) (Traefik on port 80 by IP, no domain).
+- `context add`, `services`, `forward` without `--port` (Postgres, and an nginx service inside the compose stack, whose port 80 is forwarded on 8080), `status`, a real `psql` query and an HTTP request through the `.internal` hostnames, and, once `forward` stops, an empty `status`, a clean hosts file and no repeater container after the grace period.
+
+It runs on pull requests that touch the companion, the repeater, the socket proxy, the forward path or the deployment files (`test/e2e/scope.sh` lists the paths), on every release-please pull request, and on demand: **Actions → e2e → Run workflow**, optionally with another Dokploy release tag. A release-please pull request starts no workflows by itself; close and reopen it to run them.
+
+The steps are the scripts in `test/e2e/`. They install Dokploy, initialize Docker Swarm, run sudo and rewrite `/etc/hosts`, so **never run them on your workstation**. To reproduce a run, use a disposable Ubuntu VM with Docker, Go, `jq`, `gnome-keyring`, `postgresql-client` and passwordless sudo, nothing listening on ports 80, 443 or 3000, and run from the repository root:
+
+```sh
+export E2E_DIR=/tmp/doktunnel-e2e DOKPLOY_VERSION=v0.30.8
+test/e2e/install-dokploy.sh
+test/e2e/build-companion.sh
+test/e2e/deploy-services.sh
+dbus-run-session -- test/e2e/run-cli.sh
+test/e2e/diagnostics.sh   # when something fails
+```
+
+Throw the VM away afterwards.
+
 ### Agent skill golden file
 
 `internal/cli/testdata/skill.golden` holds the expected `doktunnel --skill` output. When you add or change commands, flags or error codes, regenerate it and review the diff before committing:
@@ -112,7 +135,7 @@ Write commit messages in English, with a lowercase subject and no trailing perio
 
 - Pull requests are **squash-merged** by a maintainer. The PR title becomes the commit message on `main`, so it must be a valid Conventional Commit; a workflow checks this.
 - Keep each PR focused on one logical change.
-- CI must pass: `go vet`, `go build`, and `go test` on Linux, macOS, and Windows, plus the platform, Docker integration, image, GoReleaser and PR title checks.
+- CI must pass: `go vet`, `go build`, and `go test` on Linux, macOS, and Windows, plus the platform, Docker integration, image, GoReleaser and PR title checks, and the Dokploy end-to-end check when it runs.
 - If this is your first contribution, a maintainer must approve the workflows before CI runs on your pull request. Expect a short delay.
 
 ## How releases happen

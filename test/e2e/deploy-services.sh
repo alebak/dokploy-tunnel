@@ -46,14 +46,14 @@ compose_done() {
 	local status
 	status="$(trpc GET compose.one "$(jq -cn --arg id "$1" '{composeId: $id}')" | jq -r '.composeStatus')"
 	[[ $status == error ]] && fail "the deployment of compose $1 failed"
-	[[ $status == done ]]
+	[[ $status == "done" ]]
 }
 
 postgres_done() {
 	local status
 	status="$(trpc GET postgres.one "$(jq -cn --arg id "$1" '{postgresId: $id}')" | jq -r '.applicationStatus')"
 	[[ $status == error ]] && fail "the deployment of postgres $1 failed"
-	[[ $status == done ]]
+	[[ $status == "done" ]]
 }
 
 postgres_ready() {

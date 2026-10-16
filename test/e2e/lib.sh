@@ -1,4 +1,4 @@
-# shellcheck shell=bash
+# shellcheck shell=bash disable=SC2034 # the variables are used by the scripts that source this file
 #
 # Shared helpers for the end-to-end scripts in test/e2e. Source it; do not
 # run it. The scripts change the machine they run on (they install Dokploy,
