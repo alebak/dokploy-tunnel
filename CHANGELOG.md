@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.3.0](https://github.com/alebak/dokploy-tunnel/compare/v0.2.0...v0.3.0) (2026-10-20)
+
+
+### Features
+
+* **addressing:** remap ports below 1024 to port + 8000 ([#92](https://github.com/alebak/dokploy-tunnel/issues/92)) ([56aaf00](https://github.com/alebak/dokploy-tunnel/commit/56aaf00e9a6822a10f96dfc40d16af0d06bab72e))
+
 ## [0.2.0](https://github.com/alebak/dokploy-tunnel/compare/v0.1.0...v0.2.0) (2026-10-07)
 
 
